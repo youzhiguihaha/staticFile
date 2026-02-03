@@ -52,31 +52,19 @@ async function handleApi(request, env) {
 
     if (!isAuthorized) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
 
-    // 移动文件 (复制后删除旧的)
     if (url.pathname === '/api/move') {
         const { sourceKey, targetPath } = await request.json();
-        
-        // 1. 获取源文件
         const sourceObj = await env.MY_BUCKET.get(sourceKey, { type: 'stream' });
         if (!sourceObj) return new Response('Source not found', { status: 404, headers: corsHeaders });
 
-        // 2. 构造新 Key
         const fileName = sourceKey.split('/').pop();
-        // 确保 targetPath 以 / 结尾（如果是根目录则为空）
         const validTargetPath = targetPath ? (targetPath.endsWith('/') ? targetPath : `${targetPath}/`) : '';
         const newKey = validTargetPath + fileName;
 
         if (sourceKey === newKey) return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
-        // 3. 写入新位置 (保留元数据)
-        // 注意：KV 的 list() 返回的 metadata 需要重新获取或传递，这里简单起见我们假设 metadata 在 copy 时能获取
-        // 但 KV get() 不返回 metadata，除非使用 getWithMetadata。
-        // 为了完整保留 metadata，我们重新读一次带 metadata
         const { value: stream, metadata } = await env.MY_BUCKET.getWithMetadata(sourceKey, { type: 'stream' });
-        
         await env.MY_BUCKET.put(newKey, stream, { metadata });
-
-        // 4. 删除旧文件
         await env.MY_BUCKET.delete(sourceKey);
 
         return new Response(JSON.stringify({ success: true, newKey }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
@@ -91,9 +79,6 @@ async function handleApi(request, env) {
       
       const safeName = file.name.replace(/[^a-zA-Z0-9.\-\u4e00-\u9fa5]/g, '_'); 
       let keyPrefix = folder ? (folder.endsWith('/') ? folder : `${folder}/`) : '';
-      // 移除时间戳前缀，方便移动和重命名，或者保留但移动时要小心处理
-      // 为了逻辑简单，这里我们稍微简化 Key 的生成，只加时间戳前缀如果文件名冲突
-      // 但为了保持兼容，继续使用时间戳-文件名
       const key = `${keyPrefix}${Date.now()}-${safeName}`;
       
       await env.MY_BUCKET.put(key, file.stream(), {
@@ -124,27 +109,38 @@ async function handleApi(request, env) {
       });
     }
     
+    // 强化的批量删除逻辑
     if (url.pathname === '/api/batch-delete') {
        const { keys } = await request.json();
        if (!Array.isArray(keys)) return new Response('Keys must be array', { status: 400, headers: corsHeaders });
+
        let deleteCount = 0;
+       
        for (const targetKey of keys) {
-         if (targetKey.endsWith('/')) {
-            let listParams = { prefix: targetKey };
+         // 1. 先尝试删除它本身 (无论是文件还是文件夹标记)
+         await env.MY_BUCKET.delete(targetKey);
+         deleteCount++;
+
+         // 2. 如果看起来像文件夹 (以 / 结尾)，或者是被识别为文件夹的 Key
+         // 为了保险起见，我们对所有删除操作都检查一下是否有以它为前缀的子文件
+         // (除了纯文件的情况，但为了防止 "folder/" 和 "folder/file" 的问题，多查一次虽然慢点但安全)
+         const isFolderLike = targetKey.endsWith('/') || !targetKey.includes('.'); 
+         
+         if (isFolderLike) {
+            const prefix = targetKey.endsWith('/') ? targetKey : `${targetKey}/`;
+            let listParams = { prefix: prefix };
             let listing;
             do {
                 listing = await env.MY_BUCKET.list(listParams);
-                for (const key of listing.keys) {
-                    await env.MY_BUCKET.delete(key.name);
+                for (const subKey of listing.keys) {
+                    await env.MY_BUCKET.delete(subKey.name);
                     deleteCount++;
                 }
                 listParams.cursor = listing.cursor;
             } while (listing.list_complete === false);
-         } else {
-            await env.MY_BUCKET.delete(targetKey);
-            deleteCount++;
          }
        }
+       
        return new Response(JSON.stringify({ success: true, count: deleteCount }), {
          headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
