@@ -52,22 +52,66 @@ async function handleApi(request, env) {
 
     if (!isAuthorized) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
 
+    // --- 核心修复：递归移动 ---
     if (url.pathname === '/api/move') {
         const { sourceKey, targetPath } = await request.json();
-        const sourceObj = await env.MY_BUCKET.get(sourceKey, { type: 'stream' });
-        if (!sourceObj) return new Response('Source not found', { status: 404, headers: corsHeaders });
+        
+        // 目标路径处理 (确保以 / 结尾，如果是根目录则为空)
+        const safeTargetPath = targetPath ? (targetPath.endsWith('/') ? targetPath : `${targetPath}/`) : '';
+        
+        // 检查是否是文件夹 (以 / 结尾)
+        const isFolder = sourceKey.endsWith('/');
+        
+        if (isFolder) {
+            // 移动文件夹：列出所有前缀匹配的子项
+            let listParams = { prefix: sourceKey };
+            let listing;
+            let movedCount = 0;
+            
+            do {
+                listing = await env.MY_BUCKET.list(listParams);
+                for (const item of listing.keys) {
+                    const oldKey = item.name;
+                    // 计算新 Key：把 sourceKey 前缀替换为 safeTargetPath + 文件夹名
+                    // 例如：移动 "A/" 到 "B/"
+                    // oldKey: "A/pic.jpg" -> relative: "pic.jpg" -> newKey: "B/A/pic.jpg"
+                    
+                    const folderName = sourceKey.split('/').filter(Boolean).pop(); // "A"
+                    const relativePath = oldKey.slice(sourceKey.length); // "pic.jpg"
+                    
+                    // 新路径 = 目标目录 + 原文件夹名 + / + 相对路径
+                    const newKey = `${safeTargetPath}${folderName}/${relativePath}`;
+                    
+                    if (oldKey === newKey) continue;
 
-        const fileName = sourceKey.split('/').pop();
-        const validTargetPath = targetPath ? (targetPath.endsWith('/') ? targetPath : `${targetPath}/`) : '';
-        const newKey = validTargetPath + fileName;
+                    // 复制数据 (带 Metadata)
+                    const { value: stream, metadata } = await env.MY_BUCKET.getWithMetadata(oldKey, { type: 'stream' });
+                    if (stream) {
+                         await env.MY_BUCKET.put(newKey, stream, { metadata });
+                         await env.MY_BUCKET.delete(oldKey);
+                         movedCount++;
+                    }
+                }
+                listParams.cursor = listing.cursor;
+            } while (listing.list_complete === false);
+            
+            return new Response(JSON.stringify({ success: true, count: movedCount }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
-        if (sourceKey === newKey) return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        } else {
+            // 移动单个文件
+            const fileName = sourceKey.split('/').pop();
+            const newKey = safeTargetPath + fileName;
 
-        const { value: stream, metadata } = await env.MY_BUCKET.getWithMetadata(sourceKey, { type: 'stream' });
-        await env.MY_BUCKET.put(newKey, stream, { metadata });
-        await env.MY_BUCKET.delete(sourceKey);
+            if (sourceKey === newKey) return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
-        return new Response(JSON.stringify({ success: true, newKey }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            const { value: stream, metadata } = await env.MY_BUCKET.getWithMetadata(sourceKey, { type: 'stream' });
+            if (!stream) return new Response('File not found', { status: 404, headers: corsHeaders });
+            
+            await env.MY_BUCKET.put(newKey, stream, { metadata });
+            await env.MY_BUCKET.delete(sourceKey);
+
+            return new Response(JSON.stringify({ success: true, newKey }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        }
     }
 
     if (url.pathname === '/api/upload') {
@@ -101,7 +145,7 @@ async function handleApi(request, env) {
     }
 
     if (url.pathname === '/api/list') {
-      const list = await env.MY_BUCKET.list({ limit: 1000 });
+      const list = await env.MY_BUCKET.list({ limit: 1000 }); // 简单列表，暂未分页
       const files = list.keys.map(k => ({ key: k.name, ...k.metadata }));
       files.sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
       return new Response(JSON.stringify({ success: true, files }), {
@@ -109,7 +153,6 @@ async function handleApi(request, env) {
       });
     }
     
-    // 强化的批量删除逻辑
     if (url.pathname === '/api/batch-delete') {
        const { keys } = await request.json();
        if (!Array.isArray(keys)) return new Response('Keys must be array', { status: 400, headers: corsHeaders });
@@ -117,28 +160,26 @@ async function handleApi(request, env) {
        let deleteCount = 0;
        
        for (const targetKey of keys) {
-         // 1. 先尝试删除它本身 (无论是文件还是文件夹标记)
+         // 先删除本身
          await env.MY_BUCKET.delete(targetKey);
          deleteCount++;
 
-         // 2. 如果看起来像文件夹 (以 / 结尾)，或者是被识别为文件夹的 Key
-         // 为了保险起见，我们对所有删除操作都检查一下是否有以它为前缀的子文件
-         // (除了纯文件的情况，但为了防止 "folder/" 和 "folder/file" 的问题，多查一次虽然慢点但安全)
-         const isFolderLike = targetKey.endsWith('/') || !targetKey.includes('.'); 
+         // 无论是不是文件夹，都尝试清理以此为前缀的子项 (确保文件夹内容被清空)
+         // 注意：只匹配目录形式的前缀
+         const prefix = targetKey.endsWith('/') ? targetKey : targetKey + '/';
          
-         if (isFolderLike) {
-            const prefix = targetKey.endsWith('/') ? targetKey : `${targetKey}/`;
-            let listParams = { prefix: prefix };
-            let listing;
-            do {
-                listing = await env.MY_BUCKET.list(listParams);
+         let listParams = { prefix: prefix };
+         let listing;
+         do {
+            listing = await env.MY_BUCKET.list(listParams);
+            if (listing.keys.length > 0) {
                 for (const subKey of listing.keys) {
                     await env.MY_BUCKET.delete(subKey.name);
                     deleteCount++;
                 }
-                listParams.cursor = listing.cursor;
-            } while (listing.list_complete === false);
-         }
+            }
+            listParams.cursor = listing.cursor;
+         } while (listing.list_complete === false);
        }
        
        return new Response(JSON.stringify({ success: true, count: deleteCount }), {
