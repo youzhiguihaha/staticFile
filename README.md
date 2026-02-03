@@ -22,6 +22,7 @@
 3. 点击 **Connect to Git**，选择你的仓库。
 4. **构建配置**：
    - **Framework preset**: None
+   - **项目模板选择**: vue
    - **Build command**: `npm run build`
    - **Build output directory**: `dist`
 5. 点击 **Save and Deploy**。
