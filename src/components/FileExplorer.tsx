@@ -23,18 +23,17 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({ x: 0, y: 0, item: null, visible: false });
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // --- 视图计算 ---
   const viewItems = useMemo(() => {
-    // 搜索模式：显示所有匹配项，不分层级
     if (searchQuery) {
+        // 搜索结果：显示完整路径
         return files.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase())).map(f => ({
             ...f,
-            isSearchResult: true // 标记以便特殊渲染
+            displayName: f.key, // 搜索时显示完整路径
+            isSearchResult: true
         }));
     }
 
-    // 正常模式：当前目录下的子项
-    const items: (FileItem & { isFolder?: boolean })[] = [];
+    const items: (FileItem & { isFolder?: boolean, displayName?: string })[] = [];
     const processedFolders = new Set<string>();
 
     files.forEach(file => {
@@ -43,7 +42,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
         const parts = relativeKey.split('/');
 
         if (parts.length === 1) {
-            if (relativeKey !== '') items.push(file);
+            if (relativeKey !== '') items.push({ ...file, displayName: file.name });
         } else {
             const folderName = parts[0];
             if (!processedFolders.has(folderName)) {
@@ -51,6 +50,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                 items.push({
                     key: currentPath + folderName + '/',
                     name: folderName,
+                    displayName: folderName,
                     type: 'folder',
                     size: 0,
                     uploadedAt: file.uploadedAt,
@@ -65,8 +65,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
   // --- 快捷键 ---
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-        const activeTag = document.activeElement?.tagName.toLowerCase();
-        if (activeTag === 'input' || activeTag === 'textarea') return;
+        if (['input', 'textarea'].includes(document.activeElement?.tagName.toLowerCase() || '')) return;
         if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
             e.preventDefault();
             setSelection(new Set(viewItems.map(i => i.key)));
@@ -84,24 +83,16 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selection, viewItems]);
 
-  // --- 交互逻辑 ---
+  // --- 逻辑 ---
   const handleNavigate = (path: string) => {
-      // 如果是文件路径（不以/结尾），则通过选择来高亮，而不是进入目录
+      // 智能跳转：如果路径是文件，跳转到父目录并选中文件
       if (!path.endsWith('/')) {
-         // 解析父目录
          const parts = path.split('/');
-         const fileName = parts.pop();
+         parts.pop();
          const folderPath = parts.join('/') + '/';
-         const parentPath = folderPath === '/' ? '' : folderPath;
-         
-         // 只有当父目录不同时才切换目录
-         if (parentPath !== currentPath) {
-             setCurrentPath(parentPath);
-         }
-         // 选中该文件
+         setCurrentPath(folderPath === '/' ? '' : folderPath);
          setSelection(new Set([path]));
-         // 滚动到该文件 (简单实现，通过搜索自动过滤掉了其他干扰)
-         if(searchQuery) setSearchQuery(''); // 清除搜索以便看到上下文
+         if(searchQuery) setSearchQuery('');
       } else {
           setCurrentPath(path);
           setSelection(new Set());
@@ -165,19 +156,18 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     } else {
         if (item.isFolder) handleNavigate(item.key);
         else {
-            // 单选文件，展示操作栏
             setSelection(new Set([item.key]));
             setLastSelectedKey(item.key);
         }
     }
   };
 
-  // --- 渲染 ---
   return (
     <div className="bg-white rounded-xl shadow-2xl shadow-slate-200/50 border border-slate-200 overflow-hidden min-h-[600px] flex flex-col sm:flex-row select-none relative">
       {showSidebar && <div className="fixed inset-0 bg-black/20 z-30 sm:hidden" onClick={() => setShowSidebar(false)} />}
+      
       <div className={`absolute sm:relative z-40 w-64 h-full bg-white transition-transform duration-300 transform border-r border-slate-100 ${showSidebar ? 'translate-x-0' : '-translate-x-full sm:translate-x-0'} flex-shrink-0`}>
-          <FolderTree files={files} currentPath={currentPath} onNavigate={handleNavigate} onDrop={(e, t) => { e.preventDefault(); /*简化：拖到树上暂由主界面drop处理*/ }} />
+          <FolderTree files={files} currentPath={currentPath} onNavigate={handleNavigate} onDrop={(e, t) => { e.preventDefault(); }} />
       </div>
 
       <div className="flex-1 flex flex-col min-w-0 bg-white" 
@@ -189,29 +179,27 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                e.preventDefault(); 
                const data = e.dataTransfer.getData('application/json');
                if(data) {
-                   // 内部移动逻辑
                    try {
                        const { keys } = JSON.parse(data);
                        const validKeys = keys.filter((k:string) => k !== currentPath && !currentPath.startsWith(k));
-                       if(validKeys.length) {
-                           validKeys.forEach((k:string) => api.moveFile(k, currentPath).then(() => { toast.success('移动完成'); onReload(); }));
-                       }
+                       if(validKeys.length) validKeys.forEach((k:string) => api.moveFile(k, currentPath).then(() => { toast.success('移动完成'); onReload(); }));
                    } catch(err) {}
                } else if(e.dataTransfer.files.length) {
                    onUpload(Array.from(e.dataTransfer.files), currentPath);
                }
            }}
       >
-          {/* 顶部工具栏 */}
+          {/* 顶部栏 */}
           <div className="px-4 py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20 h-14">
              <div className="flex items-center gap-2 overflow-hidden flex-1">
                 <button className="sm:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full" onClick={() => setShowSidebar(true)}><Menu className="w-5 h-5" /></button>
                 <button onClick={(e) => { e.stopPropagation(); currentPath && handleNavigate(currentPath.split('/').slice(0, -2).join('/') + (currentPath.split('/').length > 2 ? '/' : '')); }} disabled={!currentPath} className={`p-2 rounded-lg transition-all ${currentPath ? 'hover:bg-slate-100 text-slate-600' : 'text-slate-300'}`}><ArrowLeft className="w-5 h-5" /></button>
-                <div className="text-sm font-medium text-slate-700 truncate px-2">{searchQuery ? '搜索结果' : (currentPath ? currentPath.split('/').filter(Boolean).pop() : '根目录')}</div>
+                <div className="text-sm font-medium text-slate-700 truncate px-2" title={currentPath}>
+                    {searchQuery ? '搜索结果' : (currentPath ? currentPath.split('/').filter(Boolean).pop() : '根目录')}
+                </div>
              </div>
 
              <div className="flex items-center gap-2">
-                {/* 动态操作栏 */}
                 {selection.size > 0 ? (
                     <div className="flex items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-100 animate-in slide-in-from-top-1 fade-in mr-2">
                         {selection.size === 1 && !Array.from(selection)[0].endsWith('/') && (
@@ -252,8 +240,8 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
 
              {viewItems.map(item => {
                  const isSelected = selection.has(item.key);
-                 // 搜索结果显示完整路径，否则显示文件名
-                 const displayName = searchQuery ? item.key : item.name;
+                 // 智能显示名称：搜索时显示路径，平时显示文件名
+                 const showName = item.displayName || item.name;
                  
                  return (
                      <div 
@@ -268,6 +256,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                         className={`relative group flex flex-col items-center p-2 rounded-xl border transition-all cursor-pointer aspect-[3/4]
                             ${isSelected ? 'border-blue-500 bg-blue-50 shadow-sm ring-1 ring-blue-500 z-10' : 'border-transparent hover:bg-white hover:shadow-md'}
                         `}
+                        title={showName} // 鼠标悬停显示完整名
                      >
                         {(isSelected || isMultiSelectMode) && (
                             <div className="absolute top-2 right-2 z-20 pointer-events-none">
@@ -275,18 +264,19 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                             </div>
                         )}
                         <div className="flex-1 w-full flex items-center justify-center overflow-hidden pointer-events-none">
-                            {item.isFolder ? <Folder className="w-16 h-16 text-blue-400/90 fill-blue-100" /> : item.type.startsWith('image/') ? <img src={api.getFileUrl(item.key)} className="w-full h-full object-contain rounded shadow-sm" loading="lazy" /> : <FileText className="w-14 h-14 text-slate-400" />}
+                            {item.isFolder ? <Folder className="w-16 h-16 text-blue-400/90 fill-blue-100" /> : item.type?.startsWith('image/') ? <img src={api.getFileUrl(item.key)} className="w-full h-full object-contain rounded shadow-sm" loading="lazy" /> : <FileText className="w-14 h-14 text-slate-400" />}
                         </div>
                         <div className="w-full text-center px-0.5 mt-2">
-                            <div className={`text-xs font-medium truncate w-full ${isSelected ? 'text-blue-700' : 'text-slate-700'}`} title={displayName}>{displayName}</div>
-                            {searchQuery && <div className="text-[10px] text-slate-400 truncate w-full">{item.isFolder ? '文件夹' : '文件'}</div>}
+                            <div className={`text-xs font-medium truncate w-full ${isSelected ? 'text-blue-700' : 'text-slate-700'}`}>{showName}</div>
+                            {searchQuery && <div className="text-[10px] text-slate-400 truncate w-full opacity-60">match</div>}
                         </div>
                      </div>
                  );
              })}
           </div>
       </div>
-      {/* 右键菜单保持精简版 */}
+      
+      {/* 极简右键菜单 */}
       {contextMenu.visible && (
           <div className="fixed z-50 bg-white/95 backdrop-blur rounded-lg shadow-xl border border-slate-100 w-40 py-1 overflow-hidden" style={{ top: contextMenu.y, left: contextMenu.x }} onClick={(e) => e.stopPropagation()}>
               {contextMenu.item ? (
