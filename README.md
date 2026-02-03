@@ -21,11 +21,10 @@
 2. 进入 **Compute (Workers & Pages)** -> **Pages**。
 3. 点击 **Connect to Git**，选择你的仓库。
 4. **构建配置**：
-   - **模板选择**: vue
    - **Framework preset**: None
    - **Build command**: `npm run build`
    - **Build output directory**: `dist`
-6. 点击 **Save and Deploy**。
+5. 点击 **Save and Deploy**。
 
 ### 4. 绑定 KV 存储 (关键步骤)
 部署完成后，你必须绑定 KV 存储，否则会报错 `Error 1101` 或提示 KV 缺失。

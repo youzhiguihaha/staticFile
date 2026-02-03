@@ -144,17 +144,31 @@ async function handleFile(request, env) {
       
       if (!key) return new Response('File Not Found', { status: 404 });
     
-      const object = await env.MY_BUCKET.get(key, { range: request.headers, onlyIf: request.headers });
+      // KV: Use getWithMetadata to retrieve value + metadata
+      const { value, metadata } = await env.MY_BUCKET.getWithMetadata(key, { type: 'stream' });
       
-      if (object === null) {
+      if (value === null) {
         return new Response('File Not Found', { status: 404 });
       }
       
       const headers = new Headers();
-      object.writeHttpMetadata(headers);
-      headers.set('etag', object.httpEtag);
       
-      return new Response(object.body, {
+      // Manually restore Content-Type from metadata
+      if (metadata && metadata.type) {
+        headers.set('Content-Type', metadata.type);
+      } else {
+        headers.set('Content-Type', 'application/octet-stream');
+      }
+
+      // Add simple caching
+      headers.set('Cache-Control', 'public, max-age=31536000');
+      
+      // Optional: Add Content-Disposition if you want to force download or set filename
+      // if (metadata && metadata.name) {
+      //   headers.set('Content-Disposition', `inline; filename="${metadata.name}"`);
+      // }
+      
+      return new Response(value, {
         headers
       });
   } catch (e) {
