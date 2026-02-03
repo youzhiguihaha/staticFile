@@ -33,9 +33,11 @@ npm run build
 2. 进入 **Pages** > **Create a project**
 3. 连接你的 Git 仓库
 4. 构建设置:
+   - **Framework preset**: `None`
    - **构建命令**: `npm run build`
    - **构建输出目录**: `dist`
-   - **根目录**: `/`
+   - **根目录**: `/` (留空)
+   - ⚠️ **不要设置 Deploy command**，留空即可！
 
 ### 4. 创建 KV 命名空间
 
