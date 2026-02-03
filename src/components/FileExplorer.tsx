@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { FileItem, api } from '../lib/api';
-import { Folder, FileText, UploadCloud, Trash2, FolderPlus, ArrowLeft, Search, CheckSquare, Square, Copy, Link as LinkIcon, MoreVertical, Scissors, ClipboardPaste, RefreshCw, X, Menu } from 'lucide-react';
+import { Folder, FileText, UploadCloud, Trash2, FolderPlus, ArrowLeft, Search, CheckSquare, Square, Copy, Link as LinkIcon, MoreVertical, Scissors, ClipboardPaste, RefreshCw, X, Menu, CheckCircle2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { FolderTree } from './FolderTree';
 
@@ -22,13 +22,14 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [lastSelectedKey, setLastSelectedKey] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [showSidebar, setShowSidebar] = useState(false); // 移动端侧边栏控制
+  const [showSidebar, setShowSidebar] = useState(false);
+  const [isMultiSelectMode, setIsMultiSelectMode] = useState(false); // 新增多选模式状态
   
   const [clipboard, setClipboard] = useState<{ key: string, type: 'cut' } | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({ x: 0, y: 0, item: null, visible: false });
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // --- 核心列表逻辑 (右侧视图) ---
+  // --- 列表逻辑 ---
   const viewItems = useMemo(() => {
     if (searchQuery) return files.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase()));
 
@@ -72,13 +73,13 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
         }
         if (e.key === 'Escape') {
             setSelection(new Set());
+            setIsMultiSelectMode(false);
             setContextMenu(prev => ({ ...prev, visible: false }));
         }
         if (e.key === 'Delete' || e.key === 'Backspace') {
             if (selection.size > 0) handleBatchDelete();
         }
     };
-
     const handleClickOutside = () => setContextMenu(prev => ({ ...prev, visible: false }));
     window.addEventListener('keydown', handleKeyDown);
     document.addEventListener('click', handleClickOutside);
@@ -88,12 +89,12 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     };
   }, [selection, viewItems]);
 
-  // --- 通用方法 ---
+  // --- 核心方法 ---
   const handleNavigate = (path: string) => {
       setCurrentPath(path);
       setSelection(new Set());
       setSearchQuery('');
-      setShowSidebar(false); // 移动端跳转后关闭侧边栏
+      setShowSidebar(false);
   };
 
   const handleCreateFolder = async () => {
@@ -145,45 +146,12 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     }
   };
 
-  // --- 拖拽逻辑 ---
-  const handleDragStart = (e: React.DragEvent, item: any) => {
-    const itemsToDrag = selection.has(item.key) ? Array.from(selection) : [item.key];
-    e.dataTransfer.setData('application/json', JSON.stringify({ keys: itemsToDrag }));
-    e.dataTransfer.effectAllowed = 'move';
-  };
-
-  // 通用的 Drop 处理 (无论是扔到文件夹图标，还是扔到左侧树)
-  const handleDropLogic = async (e: React.DragEvent, targetFolderKey: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    try {
-        const data = e.dataTransfer.getData('application/json');
-        if (!data) return; 
-        const { keys } = JSON.parse(data);
-        
-        // 过滤掉非法移动 (比如移到自己里面)
-        const validKeys = keys.filter((key: string) => key !== targetFolderKey && !targetFolderKey.startsWith(key));
-        
-        if (validKeys.length === 0) return;
-
-        const toastId = toast.loading(`正在移动 ${validKeys.length} 项...`);
-        for (const key of validKeys) {
-             await api.moveFile(key, targetFolderKey);
-        }
-        toast.dismiss(toastId);
-        toast.success('移动完成');
-        onReload();
-        setSelection(new Set());
-    } catch (e) {
-        toast.error('移动失败');
-    }
-  };
-
   // --- 交互事件 ---
   const handleItemClick = (e: React.MouseEvent, item: any) => {
     e.stopPropagation();
     
-    if (e.ctrlKey || e.metaKey) {
+    // 如果开启了多选模式，点击即为选中/反选
+    if (isMultiSelectMode || e.ctrlKey || e.metaKey) {
         const newSet = new Set(selection);
         if (newSet.has(item.key)) newSet.delete(item.key);
         else newSet.add(item.key);
@@ -216,44 +184,55 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     }
   };
 
+  // --- 拖拽逻辑 ---
+  const handleDragStart = (e: React.DragEvent, item: any) => {
+    const itemsToDrag = selection.has(item.key) ? Array.from(selection) : [item.key];
+    e.dataTransfer.setData('application/json', JSON.stringify({ keys: itemsToDrag }));
+    e.dataTransfer.effectAllowed = 'move';
+  };
+  
+  const handleDropLogic = async (e: React.DragEvent, targetFolderKey: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+        const data = e.dataTransfer.getData('application/json');
+        if (!data) return; 
+        const { keys } = JSON.parse(data);
+        const validKeys = keys.filter((key: string) => key !== targetFolderKey && !targetFolderKey.startsWith(key));
+        if (validKeys.length === 0) return;
+        const toastId = toast.loading(`正在移动 ${validKeys.length} 项...`);
+        for (const key of validKeys) await api.moveFile(key, targetFolderKey);
+        toast.dismiss(toastId);
+        toast.success('移动完成');
+        onReload();
+        setSelection(new Set());
+    } catch (e) { toast.error('移动失败'); }
+  };
+
   return (
     <div className="bg-white rounded-xl shadow-2xl shadow-slate-200/50 border border-slate-200 overflow-hidden min-h-[600px] flex flex-col sm:flex-row select-none relative">
       
-      {/* 移动端 Sidebar 遮罩 */}
-      {showSidebar && (
-          <div className="fixed inset-0 bg-black/20 z-30 sm:hidden" onClick={() => setShowSidebar(false)} />
-      )}
+      {showSidebar && <div className="fixed inset-0 bg-black/20 z-30 sm:hidden" onClick={() => setShowSidebar(false)} />}
 
-      {/* 左侧目录树 (响应式: 移动端绝对定位弹出，桌面端固定展示) */}
       <div className={`
-          absolute sm:relative z-40 w-64 h-full bg-white transition-transform duration-300 transform
+          absolute sm:relative z-40 w-64 h-full bg-white transition-transform duration-300 transform border-r border-slate-100
           ${showSidebar ? 'translate-x-0' : '-translate-x-full sm:translate-x-0'}
           flex-shrink-0
       `}>
-          <FolderTree 
-              files={files} 
-              currentPath={currentPath} 
-              onNavigate={handleNavigate}
-              onDrop={handleDropLogic}
-          />
+          <FolderTree files={files} currentPath={currentPath} onNavigate={handleNavigate} onDrop={handleDropLogic} />
       </div>
 
-      {/* 右侧主区域 */}
       <div className="flex-1 flex flex-col min-w-0 bg-white" 
            ref={containerRef}
            onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.pageX, y: e.pageY, item: null, visible: true }); }}
-           onClick={() => setSelection(new Set())}
+           onClick={() => !isMultiSelectMode && setSelection(new Set())}
            onDragOver={e => e.preventDefault()} 
            onDrop={e => { e.preventDefault(); if(e.dataTransfer.files.length) onUpload(Array.from(e.dataTransfer.files), currentPath); }}
       >
-          {/* 顶部栏 */}
+          {/* 工具栏 */}
           <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20">
              <div className="flex items-center gap-2 overflow-hidden flex-1">
-                {/* 移动端菜单按钮 */}
-                <button className="sm:hidden p-2 -ml-2 text-slate-500" onClick={() => setShowSidebar(true)}>
-                    <Menu className="w-5 h-5" />
-                </button>
-
+                <button className="sm:hidden p-2 -ml-2 text-slate-500" onClick={() => setShowSidebar(true)}><Menu className="w-5 h-5" /></button>
                 <button 
                     onClick={(e) => { e.stopPropagation(); currentPath && handleNavigate(currentPath.split('/').slice(0, -2).join('/') + (currentPath.split('/').length > 2 ? '/' : '')); }} 
                     disabled={!currentPath}
@@ -261,24 +240,17 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                 >
                     <ArrowLeft className="w-5 h-5" />
                 </button>
-                
-                <div className="text-sm font-medium text-slate-700 truncate px-2">
-                    {currentPath ? currentPath.split('/').filter(Boolean).pop() : '根目录'}
-                </div>
+                <div className="text-sm font-medium text-slate-700 truncate px-2">{currentPath ? currentPath.split('/').filter(Boolean).pop() : '根目录'}</div>
              </div>
 
-             <div className="flex items-center gap-3">
+             <div className="flex items-center gap-2 sm:gap-3">
                  <div className="text-xs text-slate-400 hidden lg:block">
                      {selection.size > 0 ? `已选 ${selection.size} 项` : `${viewItems.length} 项`}
                  </div>
 
                 {selection.size > 0 && (
-                    <button 
-                        onClick={(e) => { e.stopPropagation(); handleBatchDelete(); }} 
-                        className="flex items-center gap-2 px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-sm font-medium hover:bg-red-100"
-                    >
-                        <Trash2 className="w-4 h-4" /> 
-                        <span className="hidden sm:inline">删除</span>
+                    <button onClick={(e) => { e.stopPropagation(); handleBatchDelete(); }} className="flex items-center gap-2 px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-sm font-medium hover:bg-red-100">
+                        <Trash2 className="w-4 h-4" /> <span className="hidden sm:inline">删除</span>
                     </button>
                 )}
 
@@ -287,20 +259,26 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                          <ClipboardPaste className="w-4 h-4" /> 粘贴
                      </button>
                 )}
-
-                <div className="relative group hidden sm:block">
+                
+                {/* 搜索框 */}
+                <div className="relative group hidden md:block">
                     <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                    <input 
-                        type="text" 
-                        placeholder="搜索" 
-                        className="w-[180px] pl-9 pr-4 py-1.5 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10 outline-none" 
-                        value={searchQuery} 
-                        onChange={e => setSearchQuery(e.target.value)}
-                        onClick={e => e.stopPropagation()}
-                    />
+                    <input type="text" placeholder="搜索" className="w-[140px] pl-9 pr-4 py-1.5 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10 outline-none" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onClick={e => e.stopPropagation()} />
                 </div>
                 
-                <button onClick={(e) => { e.stopPropagation(); handleCreateFolder(); }} className="p-2 text-slate-600 hover:bg-blue-50 hover:text-blue-600 rounded-lg" title="新建文件夹"><FolderPlus className="w-5 h-5" /></button>
+                {/* 新建文件夹 */}
+                <button onClick={(e) => { e.stopPropagation(); handleCreateFolder(); }} className="p-2 text-slate-600 hover:bg-blue-50 hover:text-blue-600 rounded-lg transition-colors" title="新建文件夹">
+                    <FolderPlus className="w-5 h-5" />
+                </button>
+
+                {/* 多选模式开关 */}
+                <button 
+                    onClick={(e) => { e.stopPropagation(); setIsMultiSelectMode(!isMultiSelectMode); if(isMultiSelectMode) setSelection(new Set()); }} 
+                    className={`p-2 rounded-lg transition-all ${isMultiSelectMode ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-200' : 'text-slate-600 hover:bg-slate-100'}`}
+                    title={isMultiSelectMode ? "退出多选" : "开启多选"}
+                >
+                    <CheckSquare className="w-5 h-5" />
+                </button>
              </div>
           </div>
 
@@ -338,6 +316,13 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                             }
                         `}
                      >
+                        {/* 选中标记 (仅在选中或多选模式下显示) */}
+                        {(isSelected || isMultiSelectMode) && (
+                            <div className="absolute top-2 right-2 z-20">
+                                {isSelected ? <CheckCircle2 className="w-5 h-5 text-blue-600 fill-white" /> : <div className="w-5 h-5 rounded-full border-2 border-slate-300 bg-white/80" />}
+                            </div>
+                        )}
+
                         <div className="flex-1 w-full flex items-center justify-center overflow-hidden pointer-events-none">
                             {item.isFolder ? (
                                 <Folder className="w-16 h-16 text-blue-400/90 fill-blue-100" />
@@ -356,8 +341,8 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
              })}
           </div>
       </div>
-
-      {/* 右键菜单 */}
+      
+      {/* 右键菜单保持不变... */}
       {contextMenu.visible && (
           <div 
              className="fixed z-50 bg-white/95 backdrop-blur rounded-lg shadow-xl border border-slate-100 w-48 py-1.5 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
