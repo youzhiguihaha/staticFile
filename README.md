@@ -1,123 +1,90 @@
-# 云存储文件管理系统
+# 静态文件管理系统 (Static File Manager)
 
-基于 Cloudflare Pages + KV 构建的自托管静态文件存储系统。
+一个可以部署到 Cloudflare Pages 的静态文件管理系统，支持登录保护、文件上传、直链分享。
 
-## 功能特性
+## ✨ 功能特点
 
-- 🔐 **密码保护**: 管理后台需要密码登录才能操作
-- 📤 **文件上传**: 支持拖拽上传，支持任意文件类型
-- 📋 **文件管理**: 查看已上传文件列表，支持删除
-- 🔗 **直链分享**: 点击复制文件直链，无需登录即可访问
-- ☁️ **CDN 加速**: 利用 Cloudflare 全球 CDN 加速文件访问
-- 💾 **持久存储**: 文件存储在 Cloudflare KV 中
+- 🔐 密码登录保护
+- 📤 拖拽上传文件
+- 📋 文件列表管理
+- 🔗 一键复制直链（无需登录即可访问）
+- ☁️ Cloudflare 全球 CDN 加速
 
-## 部署步骤
+---
 
-### 1. Fork 或 Clone 项目
+## 🚀 Cloudflare 部署配置
 
-```bash
-git clone <your-repo-url>
-cd <project-folder>
-```
-
-### 2. 安装依赖并构建
-
-```bash
-npm install
-npm run build
-```
-
-### 3. 创建 Cloudflare Pages 项目
+### 第一步：创建 KV 命名空间
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
-2. 进入 **Pages** > **Create a project**
-3. 连接你的 Git 仓库
-4. 构建设置:
-   - **Framework preset**: `None`
-   - **构建命令**: `npm run build`
-   - **构建输出目录**: `dist`
-   - **根目录**: `/` (留空)
-   - ⚠️ **不要设置 Deploy command**，留空即可！
+2. 左侧菜单 → **Workers 和 Pages** → **KV**
+3. 点击 **创建命名空间**
+4. 名称填写：`FILES_KV`
+5. 创建后，**复制 ID**（格式类似：`abc123def456...`）
 
-### 4. 创建 KV 命名空间
+### 第二步：修改 wrangler.toml
 
-1. 在 Cloudflare Dashboard 进入 **Workers & Pages** > **KV**
-2. 点击 **Create namespace**
-3. 输入名称，例如: `FILES_KV`
-4. 记下创建的 KV 命名空间 ID
+打开项目中的 `wrangler.toml` 文件，将 KV ID 替换为你刚才复制的：
 
-### 5. 绑定 KV 到 Pages
-
-1. 进入你的 Pages 项目 > **Settings** > **Functions**
-2. 在 **KV namespace bindings** 中:
-   - **Variable name**: `FILES_KV`
-   - **KV namespace**: 选择你创建的命名空间
-
-### 6. 设置环境变量
-
-1. 在 Pages 项目 > **Settings** > **Environment variables**
-2. 添加变量:
-   - **Variable name**: `AUTH_PASSWORD`
-   - **Value**: 你的管理密码 (例如: `your-secure-password`)
-3. 建议分别为 Production 和 Preview 环境设置
-
-### 7. 重新部署
-
-1. 提交一个新的 commit 触发部署
-2. 或在 Pages 控制台手动触发重新部署
-
-## 项目结构
-
-```
-├── src/                    # 前端源码
-│   ├── components/        # React 组件
-│   │   ├── Login.tsx      # 登录页面
-│   │   ├── Dashboard.tsx  # 管理后台
-│   │   ├── FileUpload.tsx # 文件上传组件
-│   │   └── FileList.tsx   # 文件列表组件
-│   ├── hooks/             # 自定义 Hooks
-│   │   ├── useAuth.ts     # 认证状态管理
-│   │   └── useFiles.ts    # 文件操作
-│   ├── types/             # TypeScript 类型定义
-│   └── App.tsx            # 主应用组件
-├── functions/              # Cloudflare Pages Functions
-│   └── api/
-│       ├── auth.ts        # 登录认证接口
-│       ├── upload.ts      # 文件上传接口
-│       ├── files.ts       # 获取文件列表接口
-│       ├── files/[id].ts  # 删除文件接口
-│       └── file/[id].ts   # 获取文件内容接口 (公开)
-└── README.md
+```toml
+[[kv_namespaces]]
+binding = "FILES_KV"
+id = "粘贴你的KV命名空间ID到这里"
 ```
 
-## API 接口
+### 第三步：Cloudflare Pages 配置
 
-| 接口 | 方法 | 说明 | 需要认证 |
-|------|------|------|----------|
-| `/api/auth` | POST | 登录认证 | ❌ |
-| `/api/upload` | POST | 上传文件 | ✅ |
-| `/api/files` | GET | 获取文件列表 | ✅ |
-| `/api/files/:id` | DELETE | 删除文件 | ✅ |
-| `/api/file/:id` | GET | 获取文件内容 | ❌ |
+在 Cloudflare Pages 的配置界面填写：
 
-## 注意事项
+| 配置项 | 值 |
+|--------|-----|
+| **项目名称** | `static-file` （或你喜欢的名字） |
+| **构建命令** | `npm run build` |
+| **部署命令** | `npx wrangler pages deploy dist --project-name=static-file` |
+| **路径** | `/` |
 
-1. **KV 存储限制**:
-   - 免费版每个值最大 25MB
-   - 付费版每个值最大 25MB (可申请提升)
-   - 建议上传小于 25MB 的文件
+### 第四步：配置环境变量
 
-2. **安全建议**:
-   - 使用强密码
-   - 定期更换密码
-   - 生产环境建议使用更安全的认证方案
+在配置界面的 **变量** 部分：
 
-3. **直链访问**:
-   - 文件直链无需登录即可访问
-   - 链接格式: `https://your-domain.pages.dev/api/file/{file-id}`
-   - 自动设置缓存头，利用 Cloudflare CDN 加速
+| 变量名称 | 变量值 |
+|----------|--------|
+| `AUTH_PASSWORD` | `你想设置的登录密码` |
+| `CLOUDFLARE_ACCOUNT_ID` | `你的账户ID` |
+| `CLOUDFLARE_API_TOKEN` | `你的API令牌` |
 
-## 本地开发
+#### 如何获取 CLOUDFLARE_ACCOUNT_ID：
+1. 登录 Cloudflare Dashboard
+2. 右侧边栏可以看到 **账户 ID**
+3. 复制它
+
+#### 如何创建 API 令牌：
+1. 点击右上角头像 → **我的个人资料**
+2. 左侧选择 **API 令牌**
+3. 点击 **创建令牌**
+4. 选择 **编辑 Cloudflare Workers** 模板
+5. 账户资源选择你的账户
+6. 创建令牌并复制
+
+---
+
+## 📋 完整配置示例
+
+```
+项目名称: static-file
+构建命令: npm run build
+部署命令: npx wrangler pages deploy dist --project-name=static-file
+路径: /
+
+环境变量:
+- AUTH_PASSWORD = mypassword123
+- CLOUDFLARE_ACCOUNT_ID = 1234567890abcdef
+- CLOUDFLARE_API_TOKEN = xxxxxxxxxxxxx
+```
+
+---
+
+## 🔧 本地开发
 
 ```bash
 # 安装依赖
@@ -126,12 +93,56 @@ npm install
 # 启动开发服务器
 npm run dev
 
-# 构建生产版本
+# 构建
 npm run build
 ```
 
-注意: 本地开发时 API 接口需要 Cloudflare 环境支持，可以使用 `wrangler pages dev` 进行本地测试。
+---
 
-## License
+## 📁 项目结构
+
+```
+├── src/
+│   ├── App.tsx              # 主应用
+│   ├── components/
+│   │   ├── Login.tsx        # 登录页面
+│   │   ├── Dashboard.tsx    # 管理后台
+│   │   ├── FileUpload.tsx   # 上传组件
+│   │   └── FileList.tsx     # 文件列表
+│   ├── hooks/
+│   │   ├── useAuth.ts       # 认证Hook
+│   │   └── useFiles.ts      # 文件操作Hook
+│   └── types/
+│       └── index.ts         # 类型定义
+├── functions/               # Cloudflare Functions
+│   └── api/
+│       ├── auth.ts          # 登录接口
+│       ├── upload.ts        # 上传接口
+│       ├── files.ts         # 文件列表接口
+│       └── files/
+│           └── [id].ts      # 删除文件接口
+│       └── file/
+│           └── [id].ts      # 获取文件内容（公开）
+├── wrangler.toml            # Cloudflare 配置
+└── README.md
+```
+
+---
+
+## 🔑 默认登录密码
+
+如果没有设置 `AUTH_PASSWORD` 环境变量，默认密码是：`admin123`
+
+---
+
+## ⚠️ 注意事项
+
+1. **KV 存储限制**：单个值最大 25MB，适合存储图片和小文件
+2. **免费额度**：每天 100,000 次读取，1,000 次写入
+3. **直链格式**：`https://你的域名/api/file/文件ID`
+
+---
+
+## 📝 License
 
 MIT
