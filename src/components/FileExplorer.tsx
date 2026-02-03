@@ -22,7 +22,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
   const [clipboard, setClipboard] = useState<{ key: string, type: 'cut' } | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({ x: 0, y: 0, item: null, visible: false });
   const containerRef = useRef<HTMLDivElement>(null);
-  // 拖拽高亮的目标文件夹
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
 
   // --- 视图计算 ---
@@ -61,7 +60,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
         if (['input', 'textarea'].includes(document.activeElement?.tagName.toLowerCase() || '')) return;
         if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
             e.preventDefault();
-            // 修复：只全选当前视图可见的项
             setSelection(new Set(viewItems.map(i => i.key)));
         }
         if (e.key === 'Escape') {
@@ -93,6 +91,20 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
           setSearchQuery('');
       }
       setShowSidebar(false);
+  };
+
+  const handleCreateFolder = async () => {
+    if (searchQuery) { toast.error('请先退出搜索模式'); return; }
+    const name = prompt('请输入文件夹名称:');
+    if (!name) return;
+    const cleanName = name.replace(/[\/\\]/g, '').trim();
+    if (!cleanName) { toast.error('名称不能为空'); return; }
+    
+    try {
+        await api.createFolder(currentPath + cleanName);
+        toast.success('文件夹创建成功');
+        onReload();
+    } catch(e) { toast.error('创建失败'); }
   };
 
   const handleBatchDelete = async (keys: string[] = []) => {
@@ -190,7 +202,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                }
            }}
       >
-          {/* 工具栏 */}
+          {/* 顶部工具栏 */}
           <div className="px-4 py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20 h-14">
              <div className="flex items-center gap-2 overflow-hidden flex-1">
                 <button className="sm:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full" onClick={() => setShowSidebar(true)}><Menu className="w-5 h-5" /></button>
@@ -223,6 +235,12 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                             <input type="text" placeholder="搜索..." className="w-[140px] pl-9 pr-4 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:border-blue-500 outline-none transition-all" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onClick={e => e.stopPropagation()} />
                         </div>
+                        
+                        {/* 关键修复：新建文件夹按钮回归 */}
+                        <button onClick={(e) => { e.stopPropagation(); handleCreateFolder(); }} className="p-2 text-slate-600 hover:bg-blue-50 hover:text-blue-600 rounded-lg transition-colors" title="新建文件夹">
+                            <FolderPlus className="w-5 h-5" />
+                        </button>
+
                         <button onClick={(e) => { e.stopPropagation(); setIsMultiSelectMode(!isMultiSelectMode); if(isMultiSelectMode) setSelection(new Set()); }} className={`p-2 rounded-lg transition-all ${isMultiSelectMode ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`} title="多选模式"><CheckSquare className="w-5 h-5" /></button>
                     </>
                 )}
@@ -230,6 +248,14 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
           </div>
 
           <div className="p-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 content-start flex-1 bg-slate-50/30 overflow-y-auto">
+             {!searchQuery && (
+                 <label className="flex flex-col items-center justify-center p-2 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 hover:bg-blue-50 hover:border-blue-300 cursor-pointer group transition-all aspect-[3/4]" onClick={e => e.stopPropagation()}>
+                    <input type="file" multiple className="hidden" onChange={e => e.target.files && onUpload(Array.from(e.target.files), currentPath)} />
+                    <UploadCloud className="w-8 h-8 text-slate-400 group-hover:text-blue-500 mb-2 transition-colors" />
+                    <span className="text-xs text-slate-500 font-medium">上传</span>
+                 </label>
+             )}
+
              {viewItems.map(item => {
                  const isSelected = selection.has(item.key);
                  const isDraggingOver = dragOverFolder === item.key;
@@ -278,7 +304,10 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                     <button onClick={() => { handleBatchDelete(); setContextMenu({...contextMenu, visible: false}); }} className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 flex gap-2"><Trash2 className="w-3.5 h-3.5" /> 删除</button>
                   </>
               ) : (
-                  <button onClick={() => { onReload(); setContextMenu({...contextMenu, visible: false}); }} className="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 flex gap-2"><RefreshCw className="w-3.5 h-3.5" /> 刷新</button>
+                  <>
+                    <button onClick={() => { onReload(); setContextMenu({...contextMenu, visible: false}); }} className="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 flex gap-2"><RefreshCw className="w-3.5 h-3.5" /> 刷新</button>
+                    <button onClick={() => { handleCreateFolder(); setContextMenu({...contextMenu, visible: false}); }} className="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 flex gap-2"><FolderPlus className="w-3.5 h-3.5" /> 新建文件夹</button>
+                  </>
               )}
           </div>
       )}
