@@ -7,7 +7,7 @@ export interface FileItem {
 }
 
 const TOKEN_KEY = 'auth_token';
-let mockFiles: FileItem[] = []; // 本地 Mock 数据
+let mockFiles: FileItem[] = [];
 
 export const api = {
   getToken: () => localStorage.getItem(TOKEN_KEY),
@@ -56,7 +56,7 @@ export const api = {
     const token = this.getToken();
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('folder', folderPath); // 传递当前目录
+    formData.append('folder', folderPath);
     
     const res = await fetch('/api/upload', {
         method: 'POST',
@@ -73,6 +73,16 @@ export const api = {
          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
          body: JSON.stringify({ keys })
     });
+  },
+
+  async moveFile(sourceKey: string, targetPath: string): Promise<void> {
+    const token = this.getToken();
+    const res = await fetch('/api/move', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceKey, targetPath })
+    });
+    if (!res.ok) throw new Error('Move failed');
   },
 
   getFileUrl(key: string) {
