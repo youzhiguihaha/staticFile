@@ -44,7 +44,6 @@ async function handleApi(request, env) {
   }
 
   try {
-    // 登录
     if (url.pathname === '/api/login') {
       if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: corsHeaders });
       const body = await request.json();
@@ -56,19 +55,16 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: false, error: '密码错误' }), { status: 401, headers: corsHeaders });
     }
 
-    // 验证拦截
     if (!isAuthorized) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
 
-    // 上传文件 (支持目录)
     if (url.pathname === '/api/upload') {
       const formData = await request.formData();
       const file = formData.get('file');
-      const folder = formData.get('folder') || ''; // 获取前端传来的目录路径
+      const folder = formData.get('folder') || ''; 
       
       if (!file) return new Response('No file', { status: 400, headers: corsHeaders });
       
-      const safeName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
-      // 组合 Key：目录 + 时间戳 + 文件名
+      const safeName = file.name.replace(/[^a-zA-Z0-9.\-\u4e00-\u9fa5]/g, '_'); // 放宽字符限制，允许中文
       let keyPrefix = folder ? (folder.endsWith('/') ? folder : `${folder}/`) : '';
       const key = `${keyPrefix}${Date.now()}-${safeName}`;
       
@@ -81,41 +77,30 @@ async function handleApi(request, env) {
       });
     }
 
-    // 新建文件夹
     if (url.pathname === '/api/create-folder') {
       const { path } = await request.json();
       if (!path) return new Response('Path required', { status: 400, headers: corsHeaders });
-      
-      // 文件夹只是一个以 / 结尾的空 Key
       const folderKey = path.endsWith('/') ? path : `${path}/`;
-      
       await env.MY_BUCKET.put(folderKey, 'folder', {
         metadata: { name: path.split('/').filter(Boolean).pop(), type: 'folder', uploadedAt: Date.now() }
       });
-      
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // 获取列表 (返回所有文件，前端负责构建目录树)
     if (url.pathname === '/api/list') {
-      const list = await env.MY_BUCKET.list({ limit: 1000 }); // 简单起见，暂不分页
+      const list = await env.MY_BUCKET.list({ limit: 1000 });
       const files = list.keys.map(k => ({ key: k.name, ...k.metadata }));
-      // 按时间倒序
       files.sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
       return new Response(JSON.stringify({ success: true, files }), {
          headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
     
-    // 批量删除
     if (url.pathname === '/api/batch-delete') {
        const { keys } = await request.json();
        if (!Array.isArray(keys)) return new Response('Keys must be array', { status: 400, headers: corsHeaders });
-
        let deleteCount = 0;
-       
        for (const targetKey of keys) {
-         // 如果是文件夹 (以 / 结尾)，需要查找并删除下面所有文件
          if (targetKey.endsWith('/')) {
             let listParams = { prefix: targetKey };
             let listing;
@@ -128,12 +113,10 @@ async function handleApi(request, env) {
                 listParams.cursor = listing.cursor;
             } while (listing.list_complete === false);
          } else {
-            // 普通文件直接删除
             await env.MY_BUCKET.delete(targetKey);
             deleteCount++;
          }
        }
-       
        return new Response(JSON.stringify({ success: true, count: deleteCount }), {
          headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -148,8 +131,10 @@ async function handleFile(request, env) {
   if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
   try {
-    const key = new URL(request.url).pathname.replace('/file/', '');
-    // 针对 js/json/txt 等文件使用内存读取模式，解决 ECONNRESET
+    // 关键修复：使用 decodeURIComponent 解码 URL 路径中的中文
+    const rawKey = new URL(request.url).pathname.replace('/file/', '');
+    const key = decodeURIComponent(rawKey);
+
     const isCodeFile = /\.(js|json|txt|css|html|xml|md|csv)$/i.test(key);
     const fetchType = isCodeFile ? 'arrayBuffer' : 'stream';
     
@@ -159,7 +144,6 @@ async function handleFile(request, env) {
     
     const headers = new Headers(corsHeaders);
     
-    // Content-Type
     if (metadata && metadata.type) {
       const type = metadata.type;
       if ((type.includes('text') || type.includes('json') || type.includes('javascript')) && !type.includes('charset')) {
@@ -171,7 +155,6 @@ async function handleFile(request, env) {
       headers.set('Content-Type', 'application/octet-stream');
     }
     
-    // Content-Length
     if (fetchType === 'arrayBuffer') {
       headers.set('Content-Length', value.byteLength.toString());
     } else if (metadata && metadata.size) {
