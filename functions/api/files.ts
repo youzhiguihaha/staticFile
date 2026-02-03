@@ -1,20 +1,10 @@
-// Cloudflare Pages Function - 获取文件列表
-// 需要绑定 KV 命名空间: FILES_KV
-
 interface Env {
   FILES_KV: KVNamespace;
 }
 
-interface FileMetadata {
-  id: string;
-  name: string;
-  url: string;
-  size: number;
-  type: string;
-  uploadTime: number;
-}
-
 export const onRequestGet: PagesFunction<Env> = async (context) => {
+  const { request, env } = context;
+  
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
@@ -22,37 +12,31 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   };
 
   try {
-    // 验证 Authorization header
-    const authHeader = context.request.headers.get('Authorization');
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return new Response(JSON.stringify({ 
-        success: false, 
-        message: '未授权访问' 
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
-    }
+    const fileListStr = await env.FILES_KV.get('file_list');
+    const fileList: string[] = fileListStr ? JSON.parse(fileListStr) : [];
 
-    // 获取文件列表
-    const fileList = await context.env.FILES_KV.get('file_list', 'json') as FileMetadata[] || [];
+    const files = await Promise.all(
+      fileList.map(async (id) => {
+        const metaStr = await env.FILES_KV.get(`meta:${id}`);
+        if (metaStr) {
+          const meta = JSON.parse(metaStr);
+          const url = new URL(request.url);
+          return { ...meta, url: `${url.origin}/api/file/${id}` };
+        }
+        return null;
+      })
+    );
 
     return new Response(JSON.stringify({ 
       success: true, 
-      files: fileList 
+      files: files.filter(Boolean) 
     }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
-
-  } catch (error) {
-    console.error('Get files error:', error);
-    return new Response(JSON.stringify({ 
-      success: false, 
-      message: '获取文件列表失败' 
-    }), {
+  } catch {
+    return new Response(JSON.stringify({ success: false, files: [] }), {
       status: 500,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
   }
 };
@@ -63,6 +47,6 @@ export const onRequestOptions: PagesFunction = async () => {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    }
+    },
   });
 };

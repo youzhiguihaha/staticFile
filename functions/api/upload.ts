@@ -1,25 +1,10 @@
-// Cloudflare Pages Function - 文件上传接口
-// 需要绑定 KV 命名空间: FILES_KV
-
 interface Env {
   FILES_KV: KVNamespace;
-  AUTH_PASSWORD: string;
-}
-
-interface FileMetadata {
-  id: string;
-  name: string;
-  url: string;
-  size: number;
-  type: string;
-  uploadTime: number;
-}
-
-function generateId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
+  const { request, env } = context;
+  
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -27,81 +12,49 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   };
 
   try {
-    // 验证 Authorization header
-    const authHeader = context.request.headers.get('Authorization');
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return new Response(JSON.stringify({ 
-        success: false, 
-        message: '未授权访问' 
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
-    }
-
-    const formData = await context.request.formData();
+    const formData = await request.formData();
     const file = formData.get('file') as File;
 
     if (!file) {
-      return new Response(JSON.stringify({ 
-        success: false, 
-        message: '没有文件' 
-      }), {
+      return new Response(JSON.stringify({ success: false, message: '没有文件' }), {
         status: 400,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });
     }
 
-    const fileId = generateId();
-    const fileBuffer = await file.arrayBuffer();
-    
-    // 存储文件内容到 KV
-    await context.env.FILES_KV.put(`file:${fileId}`, fileBuffer, {
-      metadata: {
-        name: file.name,
-        type: file.type,
-        size: file.size
-      }
-    });
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const arrayBuffer = await file.arrayBuffer();
+    const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
 
-    // 构建文件 URL
-    const url = new URL(context.request.url);
-    const fileUrl = `${url.origin}/api/file/${fileId}`;
-
-    // 创建文件元数据
-    const fileMetadata: FileMetadata = {
-      id: fileId,
+    const metadata = {
+      id,
       name: file.name,
-      url: fileUrl,
-      size: file.size,
       type: file.type || 'application/octet-stream',
-      uploadTime: Date.now()
+      size: file.size,
+      uploadedAt: new Date().toISOString(),
     };
 
-    // 获取现有文件列表
-    const existingList = await context.env.FILES_KV.get('file_list', 'json') as FileMetadata[] || [];
-    existingList.unshift(fileMetadata);
-    
-    // 更新文件列表
-    await context.env.FILES_KV.put('file_list', JSON.stringify(existingList));
+    await env.FILES_KV.put(`file:${id}`, base64);
+    await env.FILES_KV.put(`meta:${id}`, JSON.stringify(metadata));
+
+    const existingList = await env.FILES_KV.get('file_list');
+    const fileList: string[] = existingList ? JSON.parse(existingList) : [];
+    fileList.unshift(id);
+    await env.FILES_KV.put('file_list', JSON.stringify(fileList));
+
+    const url = new URL(request.url);
+    const fileUrl = `${url.origin}/api/file/${id}`;
 
     return new Response(JSON.stringify({ 
       success: true, 
-      file: fileMetadata,
-      message: '上传成功' 
+      file: { ...metadata, url: fileUrl }
     }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
-
-  } catch (error) {
-    console.error('Upload error:', error);
-    return new Response(JSON.stringify({ 
-      success: false, 
-      message: '上传失败' 
-    }), {
+  } catch (e) {
+    return new Response(JSON.stringify({ success: false, message: '上传失败' }), {
       status: 500,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
   }
 };
@@ -112,6 +65,6 @@ export const onRequestOptions: PagesFunction = async () => {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    }
+    },
   });
 };
