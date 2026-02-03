@@ -3,13 +3,8 @@ export default {
     try {
       const url = new URL(request.url);
 
-      if (url.pathname.startsWith('/api/')) {
-        return handleApi(request, env);
-      }
-
-      if (url.pathname.startsWith('/file/')) {
-        return handleFile(request, env);
-      }
+      if (url.pathname.startsWith('/api/')) return handleApi(request, env);
+      if (url.pathname.startsWith('/file/')) return handleFile(request, env);
 
       const asset = await env.ASSETS.fetch(request);
       if (asset.status === 404 && !url.pathname.includes('.')) {
@@ -57,6 +52,36 @@ async function handleApi(request, env) {
 
     if (!isAuthorized) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
 
+    // 移动文件 (复制后删除旧的)
+    if (url.pathname === '/api/move') {
+        const { sourceKey, targetPath } = await request.json();
+        
+        // 1. 获取源文件
+        const sourceObj = await env.MY_BUCKET.get(sourceKey, { type: 'stream' });
+        if (!sourceObj) return new Response('Source not found', { status: 404, headers: corsHeaders });
+
+        // 2. 构造新 Key
+        const fileName = sourceKey.split('/').pop();
+        // 确保 targetPath 以 / 结尾（如果是根目录则为空）
+        const validTargetPath = targetPath ? (targetPath.endsWith('/') ? targetPath : `${targetPath}/`) : '';
+        const newKey = validTargetPath + fileName;
+
+        if (sourceKey === newKey) return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+
+        // 3. 写入新位置 (保留元数据)
+        // 注意：KV 的 list() 返回的 metadata 需要重新获取或传递，这里简单起见我们假设 metadata 在 copy 时能获取
+        // 但 KV get() 不返回 metadata，除非使用 getWithMetadata。
+        // 为了完整保留 metadata，我们重新读一次带 metadata
+        const { value: stream, metadata } = await env.MY_BUCKET.getWithMetadata(sourceKey, { type: 'stream' });
+        
+        await env.MY_BUCKET.put(newKey, stream, { metadata });
+
+        // 4. 删除旧文件
+        await env.MY_BUCKET.delete(sourceKey);
+
+        return new Response(JSON.stringify({ success: true, newKey }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+    }
+
     if (url.pathname === '/api/upload') {
       const formData = await request.formData();
       const file = formData.get('file');
@@ -64,8 +89,11 @@ async function handleApi(request, env) {
       
       if (!file) return new Response('No file', { status: 400, headers: corsHeaders });
       
-      const safeName = file.name.replace(/[^a-zA-Z0-9.\-\u4e00-\u9fa5]/g, '_'); // 放宽字符限制，允许中文
+      const safeName = file.name.replace(/[^a-zA-Z0-9.\-\u4e00-\u9fa5]/g, '_'); 
       let keyPrefix = folder ? (folder.endsWith('/') ? folder : `${folder}/`) : '';
+      // 移除时间戳前缀，方便移动和重命名，或者保留但移动时要小心处理
+      // 为了逻辑简单，这里我们稍微简化 Key 的生成，只加时间戳前缀如果文件名冲突
+      // 但为了保持兼容，继续使用时间戳-文件名
       const key = `${keyPrefix}${Date.now()}-${safeName}`;
       
       await env.MY_BUCKET.put(key, file.stream(), {
@@ -131,7 +159,6 @@ async function handleFile(request, env) {
   if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
   try {
-    // 关键修复：使用 decodeURIComponent 解码 URL 路径中的中文
     const rawKey = new URL(request.url).pathname.replace('/file/', '');
     const key = decodeURIComponent(rawKey);
 
