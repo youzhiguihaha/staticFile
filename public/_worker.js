@@ -31,6 +31,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS, HEAD',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range',
   'Access-Control-Expose-Headers': 'Content-Length, Content-Range',
+  'Cache-Control': 'no-store', // 只有文件下载才缓存，API 不缓存
 };
 
 async function handleApi(request, env) {
@@ -41,7 +42,6 @@ async function handleApi(request, env) {
   const password = env.PASSWORD || "admin"; 
   const isAuthorized = authHeader === `Bearer ${password}`;
   
-  // 检查 KV 是否绑定
   if (!env.MY_BUCKET) {
     return new Response(JSON.stringify({ error: 'KV未绑定 (MY_BUCKET missing)' }), { 
       status: 500, 
@@ -71,6 +71,7 @@ async function handleApi(request, env) {
       const safeName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
       const key = `${Date.now()}-${safeName}`;
       
+      // 同时写入 metadata
       await env.MY_BUCKET.put(key, file.stream(), {
         metadata: { name: file.name, type: file.type, size: file.size, uploadedAt: Date.now() }
       });
@@ -110,8 +111,22 @@ async function handleFile(request, env) {
   try {
     const key = new URL(request.url).pathname.replace('/file/', '');
     
-    // 使用 getWithMetadata 获取流和元数据
-    const { value, metadata } = await env.MY_BUCKET.getWithMetadata(key, { type: 'stream' });
+    // 优先尝试以 arrayBuffer 方式读取（解决小文件流中断问题）
+    // 但为了不消耗过多内存，我们还是先用 metadata 判断一下大小？
+    // Cloudflare KV getWithMetadata 如果不指定 type 默认是 text，这不好。
+    // 我们直接请求 arrayBuffer， Cloudflare Worker 内存通常有 128MB，
+    // 对于脚本文件（通常 < 5MB）是完全安全的。
+    // 如果是大文件，我们 catch 错误或者由用户自行承担（通常图床存小文件多）。
+    
+    // 策略优化：
+    // 检测文件名后缀，如果是 .js, .json, .txt, .css, .html 这种文本类代码，
+    // 强制使用 ArrayBuffer 模式，确保完整性。
+    // 其他（图片、视频）使用 stream 模式。
+    
+    const isCodeFile = /\.(js|json|txt|css|html|xml)$/i.test(key);
+    const fetchType = isCodeFile ? 'arrayBuffer' : 'stream';
+    
+    const { value, metadata } = await env.MY_BUCKET.getWithMetadata(key, { type: fetchType });
     
     if (!value) {
       return new Response('File Not Found', { status: 404, headers: corsHeaders });
@@ -119,19 +134,24 @@ async function handleFile(request, env) {
     
     const headers = new Headers(corsHeaders);
     
-    // 1. 设置正确的 Content-Type
+    // Content-Type
     if (metadata && metadata.type) {
       headers.set('Content-Type', metadata.type);
     } else {
-      headers.set('Content-Type', 'application/octet-stream');
+      // 补救措施：如果没有 metadata，根据后缀猜
+      if (key.endsWith('.js')) headers.set('Content-Type', 'application/javascript; charset=utf-8');
+      else if (key.endsWith('.json')) headers.set('Content-Type', 'application/json; charset=utf-8');
+      else headers.set('Content-Type', 'application/octet-stream');
     }
     
-    // 2. 设置 Content-Length (修复部分客户端读取中断的问题)
-    if (metadata && metadata.size) {
+    // Content-Length
+    // 如果是 arrayBuffer，我们可以直接知道长度
+    if (fetchType === 'arrayBuffer') {
+      headers.set('Content-Length', value.byteLength.toString());
+    } else if (metadata && metadata.size) {
       headers.set('Content-Length', metadata.size.toString());
     }
     
-    // 3. 设置缓存 (1天)
     headers.set('Cache-Control', 'public, max-age=86400');
     
     return new Response(value, { headers });
