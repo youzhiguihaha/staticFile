@@ -22,23 +22,17 @@ export function FolderTree({ files, currentPath, onNavigate, onDrop }: Props) {
     const root: TreeNode = { name: 'Root', path: '', isFolder: true, children: {} };
     files.forEach(f => {
         const parts = f.key.split('/');
-        const cleanParts = parts.filter(Boolean); // 去除空字符串
+        const cleanParts = parts.filter(Boolean);
         let currentNode = root;
         let currentPathAcc = '';
-
         cleanParts.forEach((part, index) => {
             currentPathAcc += part;
             const isLast = index === cleanParts.length - 1;
-            const isFile = isLast && !f.key.endsWith('/'); // 如果不是以/结尾且是最后一段，则是文件
+            const isFile = isLast && !f.key.endsWith('/');
             const nodePath = isFile ? f.key : currentPathAcc + '/';
-            
             if (!currentNode.children[part]) {
                 currentNode.children[part] = { 
-                    name: part, 
-                    path: nodePath,
-                    isFolder: !isFile,
-                    type: isFile ? f.type : undefined,
-                    children: {} 
+                    name: part, path: nodePath, isFolder: !isFile, type: isFile ? f.type : undefined, children: {} 
                 };
             }
             currentNode = currentNode.children[part];
@@ -49,7 +43,6 @@ export function FolderTree({ files, currentPath, onNavigate, onDrop }: Props) {
   }, [files]);
 
   return (
-    // 关键修复：添加 overflow-x-auto 和 min-w-full，确保深层级可以横向滚动查看
     <div className="w-full h-full overflow-auto select-none py-2 px-1 custom-scrollbar">
       <div className="min-w-fit">
           <div 
@@ -61,8 +54,7 @@ export function FolderTree({ files, currentPath, onNavigate, onDrop }: Props) {
             <FolderOpen className="w-4 h-4 text-blue-500 flex-shrink-0" />
             <span className="text-sm">根目录</span>
           </div>
-          
-          <div className="mt-1">
+          <div className="mt-1 relative">
             {Object.values(tree.children).sort((a,b) => (b.isFolder?1:0)-(a.isFolder?1:0)).map(node => (
                 <TreeNodeItem key={node.path} node={node} currentPath={currentPath} onNavigate={onNavigate} onDrop={onDrop} level={0} />
             ))}
@@ -86,51 +78,42 @@ function TreeNodeItem({ node, currentPath, onNavigate, onDrop, level }: { node: 
       return File;
   }, [node.type]);
 
-  const handleToggle = (e: React.MouseEvent) => {
-      e.stopPropagation();
-      setExpanded(!expanded);
-  };
-
-  const handleClick = () => {
-      onNavigate(node.path);
-      if (node.isFolder && !expanded) setExpanded(true);
-  };
+  const handleToggle = (e: React.MouseEvent) => { e.stopPropagation(); setExpanded(!expanded); };
+  const handleClick = () => { onNavigate(node.path); if (node.isFolder && !expanded) setExpanded(true); };
 
   return (
-    <div>
+    <div className="relative">
+      {/* 垂直参考线 (视觉辅助) */}
+      {level > 0 && (
+          <div className="absolute top-0 bottom-0 border-l border-slate-200/50" style={{ left: `${level * 16 + 4}px` }} />
+      )}
+
       <div 
-        className={`flex items-center gap-1.5 py-1 px-2 mx-1 rounded-md cursor-pointer transition-colors whitespace-nowrap
+        className={`flex items-center gap-1.5 py-1 px-2 mx-1 rounded-md cursor-pointer transition-colors whitespace-nowrap relative z-10
             ${isActive ? 'bg-blue-100 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-200/50'}
             ${isDragOver ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
         `}
-        style={{ paddingLeft: `${level * 16 + 12}px` }} // 增加缩进间距
+        style={{ paddingLeft: `${level * 16 + 12}px` }} 
         onClick={handleClick}
         onDragOver={node.isFolder ? e => { e.preventDefault(); e.stopPropagation(); setIsDragOver(true); } : undefined}
         onDragLeave={() => setIsDragOver(false)}
         onDrop={node.isFolder ? e => { setIsDragOver(false); onDrop(e, node.path); } : undefined}
-        title={node.name} // 鼠标悬停显示完整文件名
+        title={node.name}
       >
-        <div 
-            className={`p-0.5 rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-5 h-5 flex-shrink-0 ${!hasChildren && node.isFolder ? 'invisible' : ''}`}
-            onClick={node.isFolder ? handleToggle : undefined}
-        >
-            {node.isFolder ? (
-                expanded ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronRight className="w-3 h-3 text-slate-400" />
-            ) : <div className="w-3 h-3" />}
+        <div className={`p-0.5 rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-5 h-5 flex-shrink-0 ${!hasChildren && node.isFolder ? 'invisible' : ''}`} onClick={node.isFolder ? handleToggle : undefined}>
+            {node.isFolder ? (expanded ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronRight className="w-3 h-3 text-slate-400" />) : <div className="w-3 h-3" />}
         </div>
         
         {node.isFolder ? (
-            (isActive || expanded) ? <FolderOpen className={`w-4 h-4 flex-shrink-0 ${isActive ? 'text-blue-500' : 'text-yellow-500'}`} /> 
-            : <Folder className="w-4 h-4 text-yellow-500 flex-shrink-0" />
+            (isActive || expanded) ? <FolderOpen className={`w-4 h-4 flex-shrink-0 ${isActive ? 'text-blue-500' : 'text-yellow-500'}`} /> : <Folder className="w-4 h-4 text-yellow-500 flex-shrink-0" />
         ) : (
             <FileIcon className="w-4 h-4 text-slate-400 flex-shrink-0" />
         )}
-        
         <span className="text-sm truncate select-none block max-w-[200px]">{node.name}</span>
       </div>
 
       {expanded && hasChildren && (
-        <div className="border-l border-slate-200 ml-[calc(16px+10px)] pl-0.5">
+        <div>
            {Object.values(node.children).sort((a,b) => (b.isFolder?1:0)-(a.isFolder?1:0)).map(child => (
                <TreeNodeItem key={child.path} node={child} currentPath={currentPath} onNavigate={onNavigate} onDrop={onDrop} level={level + 1} />
            ))}
