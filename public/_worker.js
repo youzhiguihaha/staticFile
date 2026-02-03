@@ -1,33 +1,47 @@
+
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-    
-    // API Routes
-    if (url.pathname.startsWith('/api/')) {
-       return handleApi(request, env);
-    }
-
-    // File Routes (Direct Links)
-    if (url.pathname.startsWith('/file/')) {
-       return handleFile(request, env);
-    }
-
-    // Default: Serve Static Assets (React App)
-    // If the request is for a known static asset or root, serve it.
-    // Otherwise, for SPA client-side routing, serve index.html
     try {
-      const asset = await env.ASSETS.fetch(request);
-      if (asset.status === 404 && !url.pathname.includes('.')) {
-        // Fallback to index.html for SPA routing
-        return env.ASSETS.fetch(new Request(new URL('/index.html', request.url), request));
+      const url = new URL(request.url);
+      
+      // API Routes
+      if (url.pathname.startsWith('/api/')) {
+         if (!env.MY_BUCKET) {
+           return new Response(JSON.stringify({ error: "Configuration Error: 'MY_BUCKET' KV binding is missing." }), {
+             status: 500, 
+             headers: { 'Content-Type': 'application/json' }
+           });
+         }
+         return await handleApi(request, env);
       }
-      return asset;
+  
+      // File Routes (Direct Links)
+      if (url.pathname.startsWith('/file/')) {
+         if (!env.MY_BUCKET) {
+            return new Response("Configuration Error: 'MY_BUCKET' KV binding is missing.", { status: 500 });
+         }
+         return await handleFile(request, env);
+      }
+  
+      // Default: Serve Static Assets (React App)
+      try {
+        const asset = await env.ASSETS.fetch(request);
+        if (asset.status === 404 && !url.pathname.includes('.')) {
+          // Fallback to index.html for SPA routing
+          return await env.ASSETS.fetch(new Request(new URL('/index.html', request.url), request));
+        }
+        return asset;
+      } catch (e) {
+        // Fallback if env.ASSETS is missing (local dev usually) or fails
+        return new Response('Static asset serving failed. Ensure you are deploying to Cloudflare Pages.', { status: 500 });
+      }
+
     } catch (e) {
-      return new Response('Internal Error', { status: 500 });
+      return new Response(`Internal Worker Error: ${e.message}`, { status: 500 });
     }
   }
 }
-
+  
 async function handleApi(request, env) {
   // CORS Headers
   const corsHeaders = {
@@ -124,27 +138,26 @@ async function handleApi(request, env) {
 }
 
 async function handleFile(request, env) {
-  const url = new URL(request.url);
-  const key = url.pathname.replace('/file/', '');
-  
-  if (!key) return new Response('File Not Found', { status: 404 });
-
-  const object = await env.MY_BUCKET.get(key, { range: request.headers, onlyIf: request.headers });
-  
-  if (object === null) {
-    return new Response('File Not Found', { status: 404 });
+  try {
+      const url = new URL(request.url);
+      const key = url.pathname.replace('/file/', '');
+      
+      if (!key) return new Response('File Not Found', { status: 404 });
+    
+      const object = await env.MY_BUCKET.get(key, { range: request.headers, onlyIf: request.headers });
+      
+      if (object === null) {
+        return new Response('File Not Found', { status: 404 });
+      }
+      
+      const headers = new Headers();
+      object.writeHttpMetadata(headers);
+      headers.set('etag', object.httpEtag);
+      
+      return new Response(object.body, {
+        headers
+      });
+  } catch (e) {
+      return new Response(`Error serving file: ${e.message}`, { status: 500 });
   }
-  
-  const headers = new Headers();
-  object.writeHttpMetadata(headers);
-  headers.set('etag', object.httpEtag);
-  
-  // Simple range request handling (Cloudflare KV get() supports it if we pass options properly, 
-  // but standard get() returns a body stream).
-  // Note: KV 'get' with 'range' header returns the partial body. 
-  // However, simple implementation:
-  
-  return new Response(object.body, {
-    headers
-  });
 }

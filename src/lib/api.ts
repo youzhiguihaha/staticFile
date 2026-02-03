@@ -30,14 +30,29 @@ export const api = {
             body: JSON.stringify({ password }),
             headers: { 'Content-Type': 'application/json' }
         });
+        
+        const data = await res.json().catch(() => ({}));
+        
         if (res.ok) {
-            const data = await res.json();
             localStorage.setItem(TOKEN_KEY, data.token);
             return true;
         }
+        
         if (res.status === 401) return false;
+        
+        // Check for specific configuration error from worker
+        if (data.error && data.error.includes('KV binding is missing')) {
+            alert(data.error); // Alert the user critically
+            throw new Error(data.error); // Stop execution, do not fallback to mock
+        }
+        
         throw new Error('API Error');
-    } catch (e) {
+    } catch (e: any) {
+        // If it was a configuration error, rethrow it so we don't enter mock mode
+        if (e.message && e.message.includes('KV binding is missing')) {
+            throw e; 
+        }
+
         console.warn('API Unreachable, using Mock (Password: admin)');
         await new Promise(r => setTimeout(r, MOCK_DELAY));
         if (password === 'admin') {
