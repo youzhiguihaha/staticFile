@@ -58,7 +58,6 @@ async function handleApi(request, env) {
     const password = env.PASSWORD || "admin"; 
     const passwordHash = await sha256(password);
 
-    // 登录
     if (url.pathname === '/api/login') {
       if (request.method !== 'POST') return new Response(null, { status: 405 });
       const body = await request.json();
@@ -72,7 +71,6 @@ async function handleApi(request, env) {
     if (token !== passwordHash) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
     if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500 });
 
-    // --- 上传 (无前缀 UUID) ---
     if (url.pathname === '/api/upload') {
       const formData = await request.formData();
       const file = formData.get('file');
@@ -82,28 +80,19 @@ async function handleApi(request, env) {
       const safeName = file.name.replace(/[\/|]/g, '_'); 
       const pathPrefix = folder ? (folder.endsWith('/') ? folder : `${folder}/`) : '';
       
-      // 1. 纯 UUID (例如 35e1d7a1-...)
       const fileId = uuidv4(); 
-      // 2. 逻辑路径 Key
       const pathKey = `path:${pathPrefix}${safeName}`;
 
       await env.MY_BUCKET.put(fileId, file.stream(), {
           metadata: { type: file.type, size: file.size, name: safeName }
       });
 
-      const meta = {
-          fileId: fileId,
-          name: safeName,
-          type: file.type,
-          size: file.size,
-          uploadedAt: Date.now()
-      };
+      const meta = { fileId, name: safeName, type: file.type, size: file.size, uploadedAt: Date.now() };
       await env.MY_BUCKET.put(pathKey, JSON.stringify(meta), { metadata: meta });
 
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // --- 新建文件夹 ---
     if (url.pathname === '/api/create-folder') {
       const { path } = await request.json(); 
       const safePath = path.endsWith('/') ? path : `${path}/`;
@@ -115,7 +104,6 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // --- 列表 ---
     if (url.pathname === '/api/list') {
       let files = [];
       let listParams = { prefix: 'path:', limit: 1000 };
@@ -123,7 +111,7 @@ async function handleApi(request, env) {
       do {
           listing = await env.MY_BUCKET.list(listParams);
           for (const k of listing.keys) {
-              const realPath = k.name.slice(5); // 去掉 path:
+              const realPath = k.name.slice(5); 
               const isFolder = k.metadata?.type === 'folder' || realPath.endsWith('/');
               files.push({ 
                   key: realPath,
@@ -138,7 +126,6 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true, files }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
     
-    // --- 移动 ---
     if (url.pathname === '/api/move') {
         const { sourceKey, targetPath } = await request.json(); 
         const safeTargetPrefix = targetPath ? (targetPath.endsWith('/') ? targetPath : `${targetPath}/`) : '';
@@ -177,7 +164,6 @@ async function handleApi(request, env) {
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // --- 批量删除 ---
     if (url.pathname === '/api/batch-delete') {
        const { keys } = await request.json(); 
        for (const uiKey of keys) {
@@ -215,7 +201,7 @@ async function handleApi(request, env) {
     return new Response('Not Found', { status: 404, headers: corsHeaders });
 }
 
-// --- 终极 Anti-ECONNRESET 下载逻辑 ---
+// --- 终极 Anti-ECONNRESET 修复 ---
 async function handleFile(request, env) {
   try {
     const url = new URL(request.url);
@@ -223,35 +209,55 @@ async function handleFile(request, env) {
     let pathPart = url.pathname.replace('/file/', '');
     let fileId = decodeURIComponent(pathPart);
     
-    // 去掉后缀
+    // 去掉可能的伪后缀
     const lastDot = fileId.lastIndexOf('.');
     if (lastDot > 0) fileId = fileId.substring(0, lastDot);
 
-    // 格式检查 (简单的长度检查)
     if (fileId.length < 10) return new Response('Invalid ID', { status: 400 });
 
     const ext = pathPart.split('.').pop().toLowerCase();
     
-    // 【核心改动】: 对所有文件强制使用 arrayBuffer (Buffer-First)
-    // 确保 Node.js/Electron 客户端 (如 LuoXue) 能一次性接收完整包
-    // 同时强制关闭连接 (Connection: close)
-    
-    const { value, metadata } = await env.MY_BUCKET.getWithMetadata(fileId, { type: 'arrayBuffer' });
-    if (!value) return new Response('File Not Found', { status: 404, headers: corsHeaders });
+    // 强制把这些容易报错的文件当做 "文本" 读取
+    const isTextMode = ['js', 'json', 'txt', 'css', 'lrc', 'md', 'xml', 'html'].includes(ext);
 
-    const headers = new Headers(corsHeaders);
-    headers.set('Access-Control-Allow-Origin', '*'); 
-    
-    if (MIME_TYPES[ext]) headers.set('Content-Type', MIME_TYPES[ext]);
-    else headers.set('Content-Type', metadata?.type || 'application/octet-stream');
+    if (isTextMode) {
+        // 1. 以文本方式读取 (KV 不会返回流，而是返回完整字符串)
+        const textValue = await env.MY_BUCKET.get(fileId, { type: 'text' });
+        
+        if (textValue === null) return new Response('File Not Found', { status: 404, headers: corsHeaders });
 
-    // 强制静态化参数
-    headers.set('Content-Length', value.byteLength.toString());
-    headers.set('Content-Encoding', 'identity'); // 禁止压缩
-    headers.set('Connection', 'close'); // 短连接
-    headers.set('Cache-Control', 'no-transform, public, max-age=86400'); 
+        // 2. 转换回 Bytes 计算精确长度 (处理 UTF-8 多字节字符)
+        const encoder = new TextEncoder();
+        const bytes = encoder.encode(textValue);
 
-    return new Response(value, { headers });
+        const headers = new Headers(corsHeaders);
+        headers.set('Access-Control-Allow-Origin', '*');
+        headers.set('Content-Type', MIME_TYPES[ext] || 'text/plain; charset=utf-8');
+        headers.set('Content-Length', bytes.length.toString());
+        
+        // 3. 彻底禁用缓存和压缩
+        headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+        headers.set('Pragma', 'no-cache');
+        headers.set('Content-Encoding', 'identity'); // 告诉 Cloudflare 不要压缩
+        headers.set('Connection', 'close'); // 发送完立即断开
+
+        // 4. 返回字节流
+        return new Response(bytes, { headers });
+    } else {
+        // 二进制大文件 (图片/音频) 依然用流，否则内存不够
+        const { value, metadata } = await env.MY_BUCKET.getWithMetadata(fileId, { type: 'stream' });
+        if (!value) return new Response('File Not Found', { status: 404, headers: corsHeaders });
+
+        const headers = new Headers(corsHeaders);
+        headers.set('Access-Control-Allow-Origin', '*'); 
+        headers.set('Content-Type', metadata?.type || 'application/octet-stream');
+        
+        if (metadata?.size) headers.set('Content-Length', metadata.size.toString());
+        headers.set('Cache-Control', 'public, max-age=86400');
+        headers.set('Connection', 'keep-alive');
+
+        return new Response(value, { headers });
+    }
 
   } catch (e) { return new Response(null, { status: 500, headers: corsHeaders }); }
 }
