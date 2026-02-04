@@ -1,3 +1,6 @@
+// 内部存储分隔符 (用户不可见)
+const SEP = '|';
+
 const MIME_TYPES = {
   'html': 'text/html; charset=utf-8',
   'css': 'text/css; charset=utf-8',
@@ -14,12 +17,12 @@ const MIME_TYPES = {
   'webp': 'image/webp',
   'svg': 'image/svg+xml',
   'mp3': 'audio/mpeg',
+  'flac': 'audio/flac',
+  'wav': 'audio/wav',
+  'm4a': 'audio/mp4',
   'lrc': 'text/plain; charset=utf-8',
   'mp4': 'video/mp4'
 };
-
-// 安全分隔符 (替代斜杠)
-const SEP = '|';
 
 export default {
   async fetch(request, env) {
@@ -28,6 +31,7 @@ export default {
       if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
       if (url.pathname.startsWith('/api/')) return handleApi(request, env);
       if (url.pathname.startsWith('/file/')) return handleFile(request, env);
+      
       const asset = await env.ASSETS.fetch(request);
       if (asset.status === 404 && !url.pathname.includes('.')) {
         return env.ASSETS.fetch(new Request(new URL('/index.html', request.url), request));
@@ -43,7 +47,7 @@ const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, PUT, OPTIONS, HEAD',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range',
-  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, ETag, Last-Modified',
+  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, ETag, Last-Modified, Content-Disposition',
 };
 
 async function handleApi(request, env) {
@@ -51,8 +55,9 @@ async function handleApi(request, env) {
     const authHeader = request.headers.get('Authorization');
     const password = env.PASSWORD || "admin"; 
     
+    // Login
     if (url.pathname === '/api/login') {
-      if (request.method !== 'POST') return new Response('Method 405', { status: 405, headers: corsHeaders });
+      if (request.method !== 'POST') return new Response(null, { status: 405, headers: corsHeaders });
       const body = await request.json();
       return body.password === password 
         ? new Response(JSON.stringify({ success: true, token: password }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } })
@@ -62,42 +67,39 @@ async function handleApi(request, env) {
     if (authHeader !== `Bearer ${password}`) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
     if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
-    // --- 上传 ---
+    // Upload
     if (url.pathname === '/api/upload') {
       const formData = await request.formData();
       const file = formData.get('file');
-      // folder 传过来是 "photos/2023/" 格式，需要转为 "photos|2023|"
       const folder = formData.get('folder') || ''; 
       if (!file) return new Response('No file', { status: 400, headers: corsHeaders });
       
-      const safeName = file.name.replace(/[^a-zA-Z0-9.\-\u4e00-\u9fa5]/g, '_'); 
-      // 转换路径分隔符
+      // 1. 替换文件名中的非法字符 (包括分隔符 | )
+      const safeFileName = file.name.replace(/[|]/g, '_'); 
+      // 2. 文件夹路径转换 ( / -> | )
       let keyPrefix = folder ? folder.split('/').filter(Boolean).join(SEP) + SEP : '';
       
-      const key = `${keyPrefix}${Date.now()}-${safeName}`;
+      const key = `${keyPrefix}${Date.now()}-${safeFileName}`;
       
       await env.MY_BUCKET.put(key, file.stream(), {
-        metadata: { name: file.name, type: file.type, size: file.size, uploadedAt: Date.now() }
+        metadata: { name: safeFileName, type: file.type, size: file.size, uploadedAt: Date.now() }
       });
       return new Response(JSON.stringify({ success: true, key }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // --- 新建文件夹 ---
+    // Create Folder
     if (url.pathname === '/api/create-folder') {
-      const { path } = await request.json(); // path: "photos/new/"
+      const { path } = await request.json();
       if (!path) return new Response('Path required', { status: 400, headers: corsHeaders });
-      
-      // 转换为内部格式: "photos|new|"
       const folderKey = path.split('/').filter(Boolean).join(SEP) + SEP;
       const folderName = path.split('/').filter(Boolean).pop();
-      
       await env.MY_BUCKET.put(folderKey, 'folder', {
         metadata: { name: folderName, type: 'folder', uploadedAt: Date.now() }
       });
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // --- 列表 (返回给前端时需要把 | 转回 / 吗？不需要，前端统一处理显示) ---
+    // List
     if (url.pathname === '/api/list') {
       let files = [];
       let listParams = { limit: 1000 };
@@ -111,11 +113,9 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true, files }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
     
-    // --- 移动/重命名 ---
+    // Move
     if (url.pathname === '/api/move') {
-        const { sourceKey, targetPath } = await request.json(); // sourceKey: "a|b.jpg", targetPath: "new/path/"
-        
-        // 目标路径转内部格式: "new|path|"
+        const { sourceKey, targetPath } = await request.json();
         const safeTargetPrefix = targetPath ? targetPath.split('/').filter(Boolean).join(SEP) + SEP : '';
         
         if (sourceKey.endsWith(SEP) && safeTargetPrefix.startsWith(sourceKey)) {
@@ -131,25 +131,12 @@ async function handleApi(request, env) {
                 listing = await env.MY_BUCKET.list(listParams);
                 for (const item of listing.keys) {
                     const oldKey = item.name;
-                    // 计算新 Key
-                    // sourceKey: "A|"
-                    // oldKey: "A|pic.jpg"
-                    // suffix: "pic.jpg"
                     const suffix = oldKey.slice(sourceKey.length); 
-                    const folderName = sourceKey.split(SEP).filter(Boolean).pop(); // "A"
-                    
-                    // newKey: safeTargetPrefix + "A" + "|" + suffix
-                    // 即 "B|A|pic.jpg"
+                    const folderName = sourceKey.split(SEP).filter(Boolean).pop();
                     const newKey = `${safeTargetPrefix}${folderName}${SEP}${suffix}`;
-                    
                     if (oldKey === newKey) continue;
-                    
                     const { value: stream, metadata } = await env.MY_BUCKET.getWithMetadata(oldKey, { type: 'stream' });
-                    if (stream) {
-                         await env.MY_BUCKET.put(newKey, stream, { metadata });
-                         await env.MY_BUCKET.delete(oldKey);
-                         movedCount++;
-                    }
+                    if (stream) { await env.MY_BUCKET.put(newKey, stream, { metadata }); await env.MY_BUCKET.delete(oldKey); movedCount++; }
                 }
                 listParams.cursor = listing.cursor;
             } while (listing.list_complete === false);
@@ -158,7 +145,6 @@ async function handleApi(request, env) {
             const fileName = sourceKey.split(SEP).pop();
             const newKey = safeTargetPrefix + fileName;
             if (sourceKey === newKey) return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-
             const { value: stream, metadata } = await env.MY_BUCKET.getWithMetadata(sourceKey, { type: 'stream' });
             if (!stream) return new Response('File not found', { status: 404, headers: corsHeaders });
             await env.MY_BUCKET.put(newKey, stream, { metadata });
@@ -167,25 +153,19 @@ async function handleApi(request, env) {
         }
     }
 
-    // --- 批量删除 ---
+    // Batch Delete
     if (url.pathname === '/api/batch-delete') {
        const { keys } = await request.json();
        let deleteCount = 0;
        for (const targetKey of keys) {
          await env.MY_BUCKET.delete(targetKey);
          deleteCount++;
-         // 递归删除: 如果是文件夹 "A|"，删除所有以 "A|" 开头的
-         // 如果是文件 "A|b.jpg"，前缀就是它自己，list 不会多删
-         // 但为了保险，如果是文件，我们不进行 list 删除
          if (targetKey.endsWith(SEP)) {
              let listParams = { prefix: targetKey };
              let listing;
              do {
                 listing = await env.MY_BUCKET.list(listParams);
-                for (const subKey of listing.keys) {
-                    await env.MY_BUCKET.delete(subKey.name);
-                    deleteCount++;
-                }
+                for (const subKey of listing.keys) { await env.MY_BUCKET.delete(subKey.name); deleteCount++; }
                 listParams.cursor = listing.cursor;
              } while (listing.list_complete === false);
          }
@@ -196,14 +176,40 @@ async function handleApi(request, env) {
     return new Response('Not Found', { status: 404, headers: corsHeaders });
 }
 
-// --- 文件直链 ---
+// --- 文件直链核心逻辑 (Base64版) ---
 async function handleFile(request, env) {
   try {
-    const rawKey = new URL(request.url).pathname.replace('/file/', '');
-    // 这里 key 已经是 "A|B|c.jpg" 格式，浏览器不会把它当路径解析
-    const key = decodeURIComponent(rawKey);
+    // 1. 获取 Base64 字符串
+    // URL 格式: /file/ZnVjay5qcGc=.jpg 或 /file/ZnVjay5qcGc=
+    // 我们需要去掉开头的 /file/ 和结尾的 .ext (如果有)
+    
+    let pathPart = new URL(request.url).pathname.replace('/file/', '');
+    
+    // 尝试去除伪装的扩展名，找到最后一个 . 之后的部分，如果它看起来像扩展名 (长度<5)
+    // 但 Base64 也可能包含符号，所以更安全的做法是：直接把整个字符串当作 Base64 尝试解码
+    // 前端生成的格式是: /file/BASE64.ext
+    
+    let base64Str = pathPart;
+    // 如果包含点，且点后面是扩展名，则去掉点和后缀
+    const lastDotIndex = pathPart.lastIndexOf('.');
+    if (lastDotIndex > 0) {
+        base64Str = pathPart.substring(0, lastDotIndex);
+    }
+    
+    // 解码 Base64 获取真实 Key
+    let key;
+    try {
+        // atob 在 Worker 环境可用。注意：key 可能包含 UTF-8 字符，需要 escape/decodeURIComponent 处理
+        key = decodeURIComponent(escape(atob(base64Str)));
+    } catch (e) {
+        // 如果解码失败，尝试直接作为 key 读取 (兼容旧链接)
+        key = decodeURIComponent(pathPart);
+    }
 
     const isTextOrCode = /\.(js|json|txt|css|html|xml|md|csv|lrc|yml|yaml|ts|tsx|log|conf|ini)$/i.test(key);
+    
+    // 2. 彻底解决 ECONNRESET：小文件和文本文件强制一次性读取 (arrayBuffer)
+    // 其他大文件使用 stream
     const fetchType = isTextOrCode ? 'arrayBuffer' : 'stream';
     
     const { value, metadata } = await env.MY_BUCKET.getWithMetadata(key, { type: fetchType });
@@ -212,9 +218,10 @@ async function handleFile(request, env) {
     
     const headers = new Headers(corsHeaders);
     
+    // 3. 智能 Content-Type
     let contentType = metadata?.type;
+    const ext = key.split('.').pop().toLowerCase();
     if (!contentType || contentType === 'application/octet-stream') {
-        const ext = key.split('.').pop().toLowerCase();
         if (MIME_TYPES[ext]) contentType = MIME_TYPES[ext];
     }
     if (contentType && (contentType.includes('text') || contentType.includes('json') || contentType.includes('javascript')) && !contentType.includes('charset')) {
@@ -222,14 +229,20 @@ async function handleFile(request, env) {
     }
     headers.set('Content-Type', contentType || 'application/octet-stream');
     
+    // 4. 精确 Content-Length
     if (fetchType === 'arrayBuffer') {
       headers.set('Content-Length', value.byteLength.toString());
     } else if (metadata && metadata.size) {
       headers.set('Content-Length', metadata.size.toString());
     }
     
+    // 5. 关键：Content-Disposition
+    // 告诉客户端这是什么文件，让它不要瞎猜
+    const fileName = key.split(SEP).pop(); // 获取真实文件名
+    // 使用 encodeURIComponent 编码文件名，防止中文乱码导致 Header 错误
+    headers.set('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+    
     headers.set('Cache-Control', 'public, max-age=86400');
-    headers.set('Content-Disposition', 'inline'); 
     
     return new Response(value, { headers });
   } catch (e) {
