@@ -40,7 +40,6 @@ export function FolderTree({ refreshNonce = 0, currentFolderId, currentPath, onN
   };
 
   useEffect(() => {
-    // refresh 时清理缓存（避免树显示旧结构）
     setChildrenMap(new Map());
     setExpanded(new Set());
     loadChildren(root);
@@ -48,7 +47,6 @@ export function FolderTree({ refreshNonce = 0, currentFolderId, currentPath, onN
   }, [refreshNonce]);
 
   useEffect(() => {
-    // 初次加载 root
     loadChildren(root);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -76,7 +74,6 @@ export function FolderTree({ refreshNonce = 0, currentFolderId, currentPath, onN
 
       await onMove(moveItems as MoveItem[], targetFolderId);
 
-      // 移动后：清掉目标节点缓存，下次展开重新读一次（读很便宜）
       setChildrenMap((prev) => {
         const next = new Map(prev);
         next.delete(targetFolderId);
@@ -112,7 +109,9 @@ export function FolderTree({ refreshNonce = 0, currentFolderId, currentPath, onN
           title={node.name}
         >
           <div
-            className={`p-0.5 rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-5 h-5 flex-shrink-0 ${!hasChildren ? 'invisible' : ''}`}
+            className={`p-0.5 rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-5 h-5 flex-shrink-0 ${
+              !hasChildren ? 'invisible' : ''
+            }`}
             onClick={(e) => {
               e.stopPropagation();
               toggle(node);
