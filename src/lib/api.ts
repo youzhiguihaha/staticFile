@@ -1,6 +1,6 @@
 export interface FileItem {
   key: string;
-  fileId?: string;
+  fileId?: string; // a1b2c3d4e5f6
   name: string;
   type: string;
   size: number;
@@ -72,7 +72,6 @@ export const api = {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     const formData = new FormData();
-    // 自动过滤文件名非法字符
     const safeName = file.name.replace(/[\/|]/g, '_');
     const safeFile = new File([file], safeName, { type: file.type });
     formData.append('file', safeFile);
@@ -104,7 +103,6 @@ export const api = {
     });
   },
 
-  // 生成无前缀直链
   getFileUrl(item: FileItem | string) {
      let fileId = '';
      let fileName = '';
@@ -119,7 +117,7 @@ export const api = {
 
      if (!fileId) return '';
 
-     // 生成格式：/file/UUID.ext
+     // 生成格式：/file/a1b2c3d4e5f6.ext
      const ext = fileName.split('.').pop();
      const suffix = ext ? `.${ext}` : '';
      return `${window.location.origin}/file/${fileId}${suffix}`;
