@@ -86,7 +86,7 @@
    - 打开任意网页 → 按 **F12** → **Console（控制台）**  
    - 粘贴运行下面代码，按提示输入你要设置的管理员密码：
 
-(async () => {
+`(async () => {
   const password = prompt("输入管理员密码：");
   if (!password) return;
 
@@ -118,7 +118,7 @@
 
   console.log("生成完成，可分别复制：");
   console.log("__SECRETS__ =", __SECRETS__);
-})();
+})();`
 
 会弹窗让你输入要加密的密码，后面也是这个密码登录的，然后会出现下面的结果
    <div align="center">
