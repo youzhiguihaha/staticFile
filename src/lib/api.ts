@@ -17,7 +17,7 @@ function toBase64(str: string) {
 }
 
 export const api = {
-  // 检查是否超时
+  // 检查登录是否超时
   checkAuth() {
       const timeStr = localStorage.getItem(LOGIN_TIME_KEY);
       if (!timeStr) return false;
@@ -34,7 +34,7 @@ export const api = {
   logout: () => {
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(LOGIN_TIME_KEY);
-      window.location.reload(); // 强制刷新回登录页
+      window.location.reload(); 
   },
 
   async login(password: string): Promise<boolean> {
@@ -47,7 +47,8 @@ export const api = {
         if (res.ok) {
             const data = await res.json();
             localStorage.setItem(TOKEN_KEY, data.token);
-            localStorage.setItem(LOGIN_TIME_KEY, Date.now().toString()); // 记录登录时间
+            // 记录登录时间
+            localStorage.setItem(LOGIN_TIME_KEY, Date.now().toString());
             return true;
         }
         return false;
@@ -63,7 +64,7 @@ export const api = {
             const data = await res.json();
             return data.files.map((f: FileItem) => ({
                 ...f,
-                key: f.key.replaceAll(SEP, '/')
+                key: f.key.replace(new RegExp('\\' + SEP, 'g'), '/')
             }));
         }
         throw new Error('API Error');
@@ -71,7 +72,7 @@ export const api = {
   },
 
   toStoreKey(uiKey: string) {
-      return uiKey.replaceAll('/', SEP);
+      return uiKey.replace(/\//g, SEP);
   },
 
   async createFolder(path: string): Promise<void> {
