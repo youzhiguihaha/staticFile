@@ -72,7 +72,6 @@ export const api = {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     const formData = new FormData();
-    // 只替换斜杠，竖线已经不是系统分隔符了，但为了安全还是替换
     const safeName = file.name.replace(/[\/|]/g, '_');
     const safeFile = new File([file], safeName, { type: file.type });
     formData.append('file', safeFile);
@@ -109,7 +108,6 @@ export const api = {
      let fileName = '';
      
      if (typeof item === 'string') {
-         // 兼容处理
          return '';
      } else {
          fileId = item.fileId || '';
@@ -118,7 +116,6 @@ export const api = {
 
      if (!fileId) return '';
 
-     // 直接拼接 ID 和后缀，不使用 Base64，越简单越好
      const ext = fileName.split('.').pop();
      const suffix = ext ? `.${ext}` : '';
      return `${window.location.origin}/file/${fileId}${suffix}`;
