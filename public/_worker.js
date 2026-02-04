@@ -1,6 +1,5 @@
 const SEP = '|';
 
-// 强制 MIME 类型 (确保字符集)
 const MIME_TYPES = {
   'js': 'application/javascript; charset=utf-8',
   'json': 'application/json; charset=utf-8',
@@ -30,21 +29,42 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': '*',
 };
 
+// --- 辅助：SHA-256 哈希 ---
+async function sha256(str) {
+    const buf = new TextEncoder().encode(str);
+    const hash = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 async function handleApi(request, env) {
     const url = new URL(request.url);
     const authHeader = request.headers.get('Authorization');
     const password = env.PASSWORD || "admin"; 
     
+    // 计算真实密码的哈希 (用于比对 Token)
+    const passwordHash = await sha256(password);
+
     // Login
     if (url.pathname === '/api/login') {
       if (request.method !== 'POST') return new Response(null, { status: 405 });
       const body = await request.json();
-      return body.password === password 
-        ? new Response(JSON.stringify({ success: true, token: password }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } })
-        : new Response(JSON.stringify({ success: false }), { status: 401, headers: corsHeaders });
+      
+      // 登录时验证明文密码，但返回哈希 Token
+      if (body.password === password) {
+          return new Response(JSON.stringify({ success: true, token: passwordHash }), { 
+              headers: { 'Content-Type': 'application/json', ...corsHeaders } 
+          });
+      }
+      return new Response(JSON.stringify({ success: false }), { status: 401, headers: corsHeaders });
     }
 
-    if (authHeader !== `Bearer ${password}`) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+    // 验证：检查 Header 中的 Token 是否等于密码的哈希
+    // 前端发来的格式是 "Bearer <HASH>"
+    const token = authHeader ? authHeader.replace('Bearer ', '') : '';
+    if (token !== passwordHash) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+    }
+
     if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
     // Upload
@@ -145,7 +165,6 @@ async function handleApi(request, env) {
     return new Response('Not Found', { status: 404, headers: corsHeaders });
 }
 
-// --- 终极网络修复 (Anti-ECONNRESET) ---
 async function handleFile(request, env) {
   try {
     const url = new URL(request.url);
@@ -161,39 +180,34 @@ async function handleFile(request, env) {
     const ext = key.split('.').pop().toLowerCase();
     const isScript = ['js', 'json', 'txt', 'css', 'lrc', 'md', 'xml'].includes(ext);
 
-    // 1. 获取文件
     const { value, metadata } = await env.MY_BUCKET.getWithMetadata(key, { type: isScript ? 'arrayBuffer' : 'stream' });
     if (!value) return new Response('File Not Found', { status: 404, headers: corsHeaders });
 
-    // 2. 构建纯净 Headers
-    const headers = new Headers();
-    // 允许跨域
+    const headers = new Headers(corsHeaders);
     headers.set('Access-Control-Allow-Origin', '*'); 
     
-    // 强制 Content-Type
     if (MIME_TYPES[ext]) headers.set('Content-Type', MIME_TYPES[ext]);
     else headers.set('Content-Type', metadata?.type || 'application/octet-stream');
 
-    // 3. 针对脚本文件的特殊处理 (解决 LuoXue 问题)
+    let size = 0;
+    if (isScript) size = value.byteLength;
+    else if (metadata?.size) size = metadata.size;
+    if (size > 0) headers.set('Content-Length', size.toString());
+    
     if (isScript) {
-        // 绝对禁止压缩，确保 Content-Length 真实有效
         headers.set('Content-Encoding', 'identity');
-        headers.set('Content-Length', value.byteLength.toString());
-        // 禁用缓存，防止中间件干扰
+        headers.set('Connection', 'close'); 
         headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
         headers.set('Pragma', 'no-cache');
         headers.set('Expires', '0');
     } else {
-        // 其他大文件允许缓存
+        headers.set('Connection', 'keep-alive');
         headers.set('Cache-Control', 'public, max-age=86400');
-        if (metadata?.size) headers.set('Content-Length', metadata.size.toString());
     }
 
-    // 4. 处理 Range 请求
     const rangeHeader = request.headers.get('Range');
     if (rangeHeader && !isScript) { 
-        // 脚本文件不处理 Range，强制一次性下载
-        // ... (大文件 Range 逻辑保持不变，为节省空间省略，因为主要问题是脚本文件) ...
+        // ... (Range 逻辑同前) ...
     }
 
     return new Response(value, { headers });
