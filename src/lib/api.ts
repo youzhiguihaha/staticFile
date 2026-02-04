@@ -1,6 +1,6 @@
 export interface FileItem {
-  key: string; // 显示路径 (A/B/c.jpg)
-  fileId?: string; // 物理 ID (file:UUID)
+  key: string; // "A/B/c.jpg"
+  fileId?: string; // "file:UUID"
   name: string;
   type: string;
   size: number;
@@ -10,9 +10,6 @@ export interface FileItem {
 const TOKEN_KEY = 'auth_token';
 const LOGIN_TIME_KEY = 'login_timestamp';
 const TIMEOUT_MS = 12 * 60 * 60 * 1000; 
-
-// 简单的 SHA-256 (用于 Token 加密) - 前端不需要 hash，直接传后端返回的 token
-// 这里不需要修改 login 逻辑
 
 export const api = {
   checkAuth() {
@@ -56,7 +53,7 @@ export const api = {
     const res = await fetch('/api/list', { headers: { 'Authorization': `Bearer ${token}` } });
     if (res.ok) {
         const data = await res.json();
-        return data.files; // 直接返回，后端已经处理好格式
+        return data.files; // 直接返回
     }
     throw new Error('API Error');
   },
@@ -75,7 +72,11 @@ export const api = {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     const formData = new FormData();
-    formData.append('file', file);
+    // 自动过滤文件名非法字符
+    const safeName = file.name.replace(/[\/|]/g, '_');
+    const safeFile = new File([file], safeName, { type: file.type });
+    
+    formData.append('file', safeFile);
     formData.append('folder', folderPath); 
     await fetch('/api/upload', {
         method: 'POST',
@@ -90,7 +91,7 @@ export const api = {
     await fetch('/api/batch-delete', {
          method: 'POST',
          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-         body: JSON.stringify({ keys })
+         body: JSON.stringify({ keys }) // 直接传 UI key
     });
   },
 
@@ -104,27 +105,22 @@ export const api = {
     });
   },
 
-  // 核心：根据 item 获取直链
-  // 注意：这里需要传入 item 对象，不仅仅是 key
+  // 关键：获取直链 (优先使用 fileId)
   getFileUrl(item: FileItem | string) {
      let fileId = '';
      let fileName = '';
      
      if (typeof item === 'string') {
-         // 如果只传了 key (兼容旧调用)，我们无法获取 fileId
-         // 这种情况下，说明是在列表加载前或者特殊情况
-         // 临时方案：如果 UI 还没拿到 fileId，可能无法生成直链
-         // 但通常 UI 都是从 listFiles 拿到的 item，里面有 fileId
-         console.error("Old API usage: getFileUrl should receive FileItem object");
+         console.error("Use item object for getFileUrl");
          return '';
      } else {
-         fileId = item.fileId || '';
+         fileId = item.fileId || ''; // 使用物理 ID
          fileName = item.name;
      }
 
      if (!fileId) return '';
 
-     // 生成纯净链接：/file/file:UUID.js
+     // 生成格式：/file/file:UUID.js
      const ext = fileName.split('.').pop();
      const suffix = ext ? `.${ext}` : '';
      return `${window.location.origin}/file/${fileId}${suffix}`;
