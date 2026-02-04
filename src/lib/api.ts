@@ -4,12 +4,16 @@ export interface FileItem {
   type: string;
   size: number;
   uploadedAt: number;
-  // 辅助字段：前端转换后的显示路径
   displayPath?: string; 
 }
 
 const TOKEN_KEY = 'auth_token';
-const SEP = '|'; // 与后端保持一致
+const SEP = '|';
+
+// Base64 编码辅助 (处理 UTF-8)
+function toBase64(str: string) {
+    return btoa(unescape(encodeURIComponent(str)));
+}
 
 export const api = {
   getToken: () => localStorage.getItem(TOKEN_KEY),
@@ -39,21 +43,7 @@ export const api = {
             const data = await res.json();
             return data.files.map((f: FileItem) => ({
                 ...f,
-                // 将后端存储的 "A|B|c.jpg" 转换为 "A/B/c.jpg" 供前端逻辑使用
-                // 注意：我们这里不改变 key 本身，因为 key 是唯一标识
-                // 但为了兼容之前的 UI 逻辑 (key.split('/'))，我们需要把 key 中的 | 替换为 /
-                // 或者修改 UI 逻辑。为了最小改动，我们这里做一层转换，但在发回后端操作时要转回去？
-                // 更好的策略：前端统一用 / 逻辑，所有发给后端的 API 都负责把 / 转为 |
-                
-                // 方案 B：key 保持 "A|B|c.jpg"，前端 UI 适配 | 分隔符
-                // 方案 C (当前采用)：我们在 listFiles 里把 key 里的 | 全部换成 / 返回给 UI
-                // 这样 UI 代码不用大改。但在调用 delete/move 等 API 时，key 已经是 / 格式了
-                // 我们在 delete/move 的 API 封装里，再把 / 换回 | 发给后端？
-                // 不行，如果文件名本身包含 / 就乱了（虽然我们上传时过滤了）。
-                // 最稳妥方案：UI 逻辑全部改为识别 | 分隔符。
-                
-                // 决定：修改 UI 组件识别 |。
-                // 为了兼容现有的 FileExplorer 代码 (大量 split('/'))，我们还是在这里把 key 伪装成 / 格式
+                // UI 仍然使用 / 作为逻辑分隔符，方便 split 操作
                 key: f.key.replaceAll(SEP, '/')
             }));
         }
@@ -61,7 +51,6 @@ export const api = {
     } catch (e) { return []; }
   },
 
-  // 辅助：把前端的 / 路径转回后端的 | key
   toStoreKey(uiKey: string) {
       return uiKey.replaceAll('/', SEP);
   },
@@ -71,15 +60,20 @@ export const api = {
     await fetch('/api/create-folder', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path }) // path: "A/B/"
+        body: JSON.stringify({ path }) 
     });
   },
 
   async upload(file: File, folderPath: string): Promise<void> {
     const token = this.getToken();
+    
+    // 前端也做一次过滤，防止 UI 显示不一致
+    const safeName = file.name.replace(/[|]/g, '_');
+    const safeFile = new File([file], safeName, { type: file.type });
+    
     const formData = new FormData();
-    formData.append('file', file);
-    formData.append('folder', folderPath); // folderPath: "A/B/"
+    formData.append('file', safeFile);
+    formData.append('folder', folderPath); 
     
     await fetch('/api/upload', {
         method: 'POST',
@@ -90,7 +84,6 @@ export const api = {
   
   async batchDelete(uiKeys: string[]): Promise<void> {
     const token = this.getToken();
-    // 转换 key
     const storeKeys = uiKeys.map(k => this.toStoreKey(k));
     await fetch('/api/batch-delete', {
          method: 'POST',
@@ -106,17 +99,25 @@ export const api = {
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
             sourceKey: this.toStoreKey(sourceUiKey), 
-            targetPath // targetPath 保持 "A/B/" 格式，后端会处理转换
+            targetPath 
         })
     });
   },
 
   getFileUrl(uiKey: string) {
-     // 生成直链：使用后端真实 Key (带 |)
-     // 例如 /file/photos|2023|cat.jpg
-     // encodeURIComponent 会把 | 变成 %7C，这也是安全的
-     // 后端 handleFile 接收到后 decode 即可
+     // 1. 获取真实 KV Key (包含 | )
      const storeKey = this.toStoreKey(uiKey);
-     return `${window.location.origin}/file/${encodeURIComponent(storeKey)}`;
+     
+     // 2. Base64 编码 (彻底隐藏路径结构)
+     const b64 = toBase64(storeKey);
+     
+     // 3. 加上扩展名伪装 (让客户端识别文件类型)
+     // 获取真实扩展名
+     const parts = storeKey.split('.');
+     const ext = parts.length > 1 ? parts.pop() : '';
+     const suffix = ext ? `.${ext}` : '';
+     
+     // 结果: /file/BASE64STRING.mp3
+     return `${window.location.origin}/file/${b64}${suffix}`;
   }
 };
