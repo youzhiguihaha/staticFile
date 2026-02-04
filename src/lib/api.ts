@@ -1,6 +1,8 @@
+// api.ts
+
 export interface FileItem {
   key: string;
-  fileId?: string; 
+  fileId?: string;
   name: string;
   type: string;
   size: number;
@@ -9,51 +11,53 @@ export interface FileItem {
 
 const TOKEN_KEY = 'auth_token';
 const LOGIN_TIME_KEY = 'login_timestamp';
-const TIMEOUT_MS = 12 * 60 * 60 * 1000; 
+const TIMEOUT_MS = 12 * 60 * 60 * 1000;
 
 export const api = {
   checkAuth() {
-      const timeStr = localStorage.getItem(LOGIN_TIME_KEY);
-      if (!timeStr) return false;
-      if (Date.now() - parseInt(timeStr) > TIMEOUT_MS) {
-          this.logout();
-          return false;
-      }
-      return !!localStorage.getItem(TOKEN_KEY);
+    const timeStr = localStorage.getItem(LOGIN_TIME_KEY);
+    if (!timeStr) return false;
+    if (Date.now() - parseInt(timeStr) > TIMEOUT_MS) {
+      this.logout();
+      return false;
+    }
+    return !!localStorage.getItem(TOKEN_KEY);
   },
 
   getToken: () => localStorage.getItem(TOKEN_KEY),
-  
+
   logout: () => {
-      localStorage.removeItem(TOKEN_KEY);
-      localStorage.removeItem(LOGIN_TIME_KEY);
-      window.location.reload(); 
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(LOGIN_TIME_KEY);
+    window.location.reload();
   },
 
   async login(password: string): Promise<boolean> {
     try {
-        const res = await fetch('/api/login', {
-            method: 'POST',
-            body: JSON.stringify({ password }),
-            headers: { 'Content-Type': 'application/json' }
-        });
-        if (res.ok) {
-            const data = await res.json();
-            localStorage.setItem(TOKEN_KEY, data.token);
-            localStorage.setItem(LOGIN_TIME_KEY, Date.now().toString());
-            return true;
-        }
-        return false;
-    } catch (e) { return false; }
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        body: JSON.stringify({ password }),
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        localStorage.setItem(TOKEN_KEY, data.token);
+        localStorage.setItem(LOGIN_TIME_KEY, Date.now().toString());
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
   },
 
   async listFiles(): Promise<FileItem[]> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
-    const res = await fetch('/api/list', { headers: { 'Authorization': `Bearer ${token}` } });
+    const res = await fetch('/api/list', { headers: { Authorization: `Bearer ${token}` } });
     if (res.ok) {
-        const data = await res.json();
-        return data.files;
+      const data = await res.json();
+      return data.files;
     }
     throw new Error('API Error');
   },
@@ -62,9 +66,9 @@ export const api = {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     await fetch('/api/create-folder', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path }) 
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
     });
   },
 
@@ -75,21 +79,21 @@ export const api = {
     const safeName = file.name.replace(/[\/|]/g, '_');
     const safeFile = new File([file], safeName, { type: file.type });
     formData.append('file', safeFile);
-    formData.append('folder', folderPath); 
+    formData.append('folder', folderPath);
     await fetch('/api/upload', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
-        body: formData
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
     });
   },
-  
+
   async batchDelete(keys: string[]): Promise<void> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     await fetch('/api/batch-delete', {
-         method: 'POST',
-         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-         body: JSON.stringify({ keys }) 
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys }),
     });
   },
 
@@ -97,23 +101,23 @@ export const api = {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     await fetch('/api/move', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceKey, targetPath })
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceKey, targetPath }),
     });
   },
 
+  // 修复/增强：允许传 FileItem 或直接传 fileId 字符串
   getFileUrl(item: FileItem | string) {
-     let fileId = '';
-     
-     if (typeof item === 'string') {
-         return '';
-     } else {
-         fileId = item.fileId || '';
-     }
+    let fileId = '';
 
-     if (!fileId) return '';
+    if (typeof item === 'string') {
+      fileId = item;
+    } else {
+      fileId = item.fileId || '';
+    }
 
-     return `${window.location.origin}/file/${fileId}`;
-  }
+    if (!fileId) return '';
+    return `${window.location.origin}/file/${encodeURIComponent(fileId)}`;
+  },
 };
