@@ -89,14 +89,13 @@ async function handleApi(request, env) {
       const safeName = file.name.replace(/[\/|]/g, '_'); 
       const pathPrefix = folder ? (folder.endsWith('/') ? folder : `${folder}/`) : '';
       
-      // 1. 获取后缀
       const parts = safeName.split('.');
       const ext = parts.length > 1 ? `.${parts.pop()}` : '';
       
-      // 2. 生成 Key: 随机字符 + 后缀 (例如 u3g0k3b8.js)
+      // 生成 Key: 随机字符 + 后缀 (例如 u3g0k3b8.js)
       const fileId = `${shortId()}${ext}`; 
       
-      // 3. 逻辑路径
+      // 逻辑路径
       const pathKey = `path:${pathPrefix}${safeName}`;
 
       await env.MY_BUCKET.put(fileId, file.stream(), {
@@ -227,7 +226,7 @@ async function handleApi(request, env) {
     return new Response('Not Found', { status: 404, headers: BASE_CORS });
 }
 
-// --- 文件直链 (修复了 ERR_CONNECTION_RESET) ---
+// --- 文件直链 (最终修复版：移除 Content-Length) ---
 async function handleFile(request, env) {
   try {
     const url = new URL(request.url);
@@ -248,19 +247,14 @@ async function handleFile(request, env) {
     if (MIME_TYPES[ext]) headers.set('Content-Type', MIME_TYPES[ext]);
     else headers.set('Content-Type', metadata?.type || 'application/octet-stream');
 
-    // 设置 Content-Length
-    if (metadata && metadata.size) {
-        headers.set('Content-Length', metadata.size.toString());
-    }
-
+    // !!! 关键修复 !!!
+    // 移除 Content-Length。
+    // 这允许浏览器使用 Chunked 编码接收文件，兼容 Cloudflare 的自动 Gzip 压缩，
+    // 彻底解决 ERR_CONNECTION_RESET。
+    
     headers.set('Cache-Control', 'public, max-age=86400');
     
-    // 关键修复：encodeBody: 'manual' 禁止 Cloudflare 自动压缩
-    // 这样 metadata.size (原始大小) 才能和 Content-Length 匹配
-    return new Response(value, { 
-        headers,
-        encodeBody: 'manual' 
-    });
+    return new Response(value, { headers });
 
   } catch (e) {
     return new Response(`File Error: ${e.message}`, { status: 500, headers: BASE_CORS });
