@@ -33,6 +33,7 @@ const BIN_PREFIX = 'bin:';
 
 const TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 
+// Workers WebCrypto PBKDF2 iterations 上限 100000
 const DEFAULT_PBKDF2_ITER = 100000;
 const MAX_PBKDF2_ITER = 100000;
 const MIN_PBKDF2_ITER = 10000;
@@ -304,6 +305,7 @@ async function handleApi(request, env) {
 
   await ensureRoot(env);
 
+  // ===== list（新增 no-store，避免缓存导致“看起来没更新→狂点刷新”）=====
   if (url.pathname === '/api/list') {
     const folderId = (url.searchParams.get('fid') || ROOT_ID).trim() || ROOT_ID;
     const path = (url.searchParams.get('path') || '').trim();
@@ -341,7 +343,15 @@ async function handleApi(request, env) {
       updatedAt: dir.updatedAt || 0,
       folders,
       files,
-    }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
+    }), {
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        ...BASE_CORS
+      }
+    });
   }
 
   if (url.pathname === '/api/create-folder') {
@@ -442,7 +452,7 @@ async function handleApi(request, env) {
     for (const it of items) {
       const fromId = (it?.fromFolderId || '').trim();
       if (!fromId) continue;
-      if (fromId === targetFolderId) continue; // 省资源：同目录 move 直接忽略
+      if (fromId === targetFolderId) continue; // 省资源：同目录 move 忽略
       if (!group.has(fromId)) group.set(fromId, { files: [], folders: [] });
       if (it.kind === 'file') group.get(fromId).files.push(it);
       if (it.kind === 'folder') group.get(fromId).folders.push(it);
