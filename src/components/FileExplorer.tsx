@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { FileItem, api } from '../lib/api';
-import { Folder, FileText, UploadCloud, Trash2, FolderPlus, ArrowLeft, Search, CheckSquare, Square, Link as LinkIcon, Scissors, ClipboardPaste, RefreshCw, X, Menu, CheckCircle2, Download } from 'lucide-react';
+import { Folder, FileText, UploadCloud, Trash2, FolderPlus, ArrowLeft, Search, CheckSquare, Square, Link as LinkIcon, Scissors, ClipboardPaste, RefreshCw, X, Menu, CheckCircle2, Download, AlertTriangle } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { FolderTree } from './FolderTree';
 
@@ -23,6 +23,9 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({ x: 0, y: 0, item: null, visible: false });
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
+  
+  // 删除确认弹窗状态
+  const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean, targets: string[] }>({ isOpen: false, targets: [] });
 
   const viewItems = useMemo(() => {
     if (searchQuery) {
@@ -65,9 +68,10 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
             setSelection(new Set());
             setIsMultiSelectMode(false);
             setContextMenu(prev => ({ ...prev, visible: false }));
+            setDeleteConfirm({ isOpen: false, targets: [] });
         }
         if (e.key === 'Delete' || e.key === 'Backspace') {
-            if (selection.size > 0) handleBatchDelete();
+            if (selection.size > 0) initiateDelete();
         }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -104,12 +108,19 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     } catch(e) { toast.error('创建失败'); }
   };
 
-  const handleBatchDelete = async (keys: string[] = []) => {
-    const targets = keys.length > 0 ? keys : Array.from(selection);
-    if (targets.length === 0) return;
+  // 1. 发起删除请求 (打开弹窗)
+  const initiateDelete = (keys: string[] = []) => {
+      const targets = keys.length > 0 ? keys : Array.from(selection);
+      if (targets.length === 0) return;
+      setDeleteConfirm({ isOpen: true, targets });
+  };
+
+  // 2. 执行删除
+  const executeDelete = async () => {
+    setDeleteConfirm({ isOpen: false, targets: [] });
     const toastId = toast.loading('正在删除...');
     try {
-        await api.batchDelete(targets);
+        await api.batchDelete(deleteConfirm.targets);
         toast.dismiss(toastId);
         toast.success('删除成功');
         setSelection(new Set());
@@ -175,6 +186,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
 
   return (
     <div className="bg-white rounded-xl shadow-2xl shadow-slate-200/50 border border-slate-200 overflow-hidden min-h-[600px] flex flex-col sm:flex-row select-none relative">
+      {/* 侧边栏 */}
       {showSidebar && <div className="fixed inset-0 bg-black/20 z-30 sm:hidden" onClick={() => setShowSidebar(false)} />}
       <div className={`absolute sm:relative z-40 w-64 h-full bg-white transition-transform duration-300 transform border-r border-slate-100 ${showSidebar ? 'translate-x-0' : '-translate-x-full sm:translate-x-0'} flex-shrink-0`}>
           <FolderTree files={files} currentPath={currentPath} onNavigate={handleNavigate} onDrop={(e, t) => e.preventDefault()} />
@@ -199,6 +211,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                }
            }}
       >
+          {/* 工具栏 */}
           <div className="px-4 py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20 h-14">
              <div className="flex items-center gap-2 overflow-hidden flex-1">
                 <button className="sm:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full" onClick={() => setShowSidebar(true)}><Menu className="w-5 h-5" /></button>
@@ -219,7 +232,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                             <button onClick={(e) => { e.stopPropagation(); handleCut(Array.from(selection)[0]); }} className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-orange-600" title="剪切"><Scissors className="w-4 h-4" /></button>
                         )}
                         <div className="w-px h-4 bg-slate-200 mx-1"></div>
-                        <button onClick={(e) => { e.stopPropagation(); handleBatchDelete(); }} className="p-2 hover:bg-white rounded-md text-red-600 hover:bg-red-50" title="删除"><Trash2 className="w-4 h-4" /></button>
+                        <button onClick={(e) => { e.stopPropagation(); initiateDelete(); }} className="p-2 hover:bg-white rounded-md text-red-600 hover:bg-red-50" title="删除"><Trash2 className="w-4 h-4" /></button>
                         <span className="px-2 text-xs text-slate-400 font-medium">{selection.size}</span>
                     </div>
                 ) : (
@@ -289,7 +302,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                   <>
                     {!contextMenu.item.isFolder && <button onClick={() => { handleCopyLink(contextMenu.item.key); setContextMenu({...contextMenu, visible: false}); }} className="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-blue-50 hover:text-blue-600 flex gap-2"><LinkIcon className="w-3.5 h-3.5" /> 复制链接</button>}
                     <button onClick={() => { handleCut(contextMenu.item.key); setContextMenu({...contextMenu, visible: false}); }} className="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-blue-50 hover:text-blue-600 flex gap-2"><Scissors className="w-3.5 h-3.5" /> 剪切</button>
-                    <button onClick={() => { handleBatchDelete(); setContextMenu({...contextMenu, visible: false}); }} className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 flex gap-2"><Trash2 className="w-3.5 h-3.5" /> 删除</button>
+                    <button onClick={() => { setContextMenu({...contextMenu, visible: false}); initiateDelete([contextMenu.item.key]); }} className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 flex gap-2"><Trash2 className="w-3.5 h-3.5" /> 删除</button>
                   </>
               ) : (
                   <>
@@ -297,6 +310,35 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                     <button onClick={() => { handleCreateFolder(); setContextMenu({...contextMenu, visible: false}); }} className="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 flex gap-2"><FolderPlus className="w-3.5 h-3.5" /> 新建文件夹</button>
                   </>
               )}
+          </div>
+      )}
+
+      {/* 删除确认 Modal (替代 confirm) */}
+      {deleteConfirm.isOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-in fade-in duration-200">
+              <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-100 scale-100 animate-in zoom-in-95 duration-200">
+                  <div className="flex flex-col items-center text-center gap-4">
+                      <div className="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center">
+                          <AlertTriangle className="w-6 h-6 text-red-500" />
+                      </div>
+                      <div>
+                          <h3 className="text-lg font-bold text-slate-800">确认删除?</h3>
+                          <p className="text-sm text-slate-500 mt-2">
+                              即将删除 {deleteConfirm.targets.length} 项文件。
+                              <br />
+                              <span className="text-red-500 font-medium">此操作不可恢复。</span>
+                          </p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 w-full mt-2">
+                          <button onClick={() => setDeleteConfirm({ isOpen: false, targets: [] })} className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors">
+                              取消
+                          </button>
+                          <button onClick={executeDelete} className="px-4 py-2 text-sm font-medium text-white bg-red-500 hover:bg-red-600 rounded-xl shadow-lg shadow-red-200 transition-all">
+                              确认删除
+                          </button>
+                      </div>
+                  </div>
+              </div>
           </div>
       )}
     </div>
