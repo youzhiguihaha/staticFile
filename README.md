@@ -1,5 +1,5 @@
 <div align="center">
-  <img width="1545" height="655" alt="项目效果展示1" src="[https://gsyn-img.pages.dev/v2/xFqvV55.png](https://gsyn-img.pages.dev/v2/QxxCc7A.png)" />
+  <img width="1545" height="655" alt="项目效果展示1" src="https://gsyn-img.pages.dev/v2/QxxCc7A.png" />
   <br/>
   <img width="1290" height="884" alt="项目效果展示2" src="https://gsyn-img.pages.dev/v2/bZVdWnA.png" />
   <br/>
