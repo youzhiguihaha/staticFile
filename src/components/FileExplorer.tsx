@@ -24,7 +24,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
   
-  // 删除确认弹窗状态
+  // 删除确认 Modal 状态
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean, targets: string[] }>({ isOpen: false, targets: [] });
 
   const viewItems = useMemo(() => {
@@ -108,14 +108,12 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     } catch(e) { toast.error('创建失败'); }
   };
 
-  // 1. 发起删除请求 (打开弹窗)
   const initiateDelete = (keys: string[] = []) => {
       const targets = keys.length > 0 ? keys : Array.from(selection);
       if (targets.length === 0) return;
       setDeleteConfirm({ isOpen: true, targets });
   };
 
-  // 2. 执行删除
   const executeDelete = async () => {
     setDeleteConfirm({ isOpen: false, targets: [] });
     const toastId = toast.loading('正在删除...');
@@ -186,7 +184,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
 
   return (
     <div className="bg-white rounded-xl shadow-2xl shadow-slate-200/50 border border-slate-200 overflow-hidden min-h-[600px] flex flex-col sm:flex-row select-none relative">
-      {/* 侧边栏 */}
       {showSidebar && <div className="fixed inset-0 bg-black/20 z-30 sm:hidden" onClick={() => setShowSidebar(false)} />}
       <div className={`absolute sm:relative z-40 w-64 h-full bg-white transition-transform duration-300 transform border-r border-slate-100 ${showSidebar ? 'translate-x-0' : '-translate-x-full sm:translate-x-0'} flex-shrink-0`}>
           <FolderTree files={files} currentPath={currentPath} onNavigate={handleNavigate} onDrop={(e, t) => e.preventDefault()} />
@@ -313,7 +310,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
           </div>
       )}
 
-      {/* 删除确认 Modal (替代 confirm) */}
       {deleteConfirm.isOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-in fade-in duration-200">
               <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-100 scale-100 animate-in zoom-in-95 duration-200">
@@ -323,19 +319,11 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                       </div>
                       <div>
                           <h3 className="text-lg font-bold text-slate-800">确认删除?</h3>
-                          <p className="text-sm text-slate-500 mt-2">
-                              即将删除 {deleteConfirm.targets.length} 项文件。
-                              <br />
-                              <span className="text-red-500 font-medium">此操作不可恢复。</span>
-                          </p>
+                          <p className="text-sm text-slate-500 mt-2">即将删除 {deleteConfirm.targets.length} 项文件。<br /><span className="text-red-500 font-medium">此操作不可恢复。</span></p>
                       </div>
                       <div className="grid grid-cols-2 gap-3 w-full mt-2">
-                          <button onClick={() => setDeleteConfirm({ isOpen: false, targets: [] })} className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors">
-                              取消
-                          </button>
-                          <button onClick={executeDelete} className="px-4 py-2 text-sm font-medium text-white bg-red-500 hover:bg-red-600 rounded-xl shadow-lg shadow-red-200 transition-all">
-                              确认删除
-                          </button>
+                          <button onClick={() => setDeleteConfirm({ isOpen: false, targets: [] })} className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors">取消</button>
+                          <button onClick={executeDelete} className="px-4 py-2 text-sm font-medium text-white bg-red-500 hover:bg-red-600 rounded-xl shadow-lg shadow-red-200 transition-all">确认删除</button>
                       </div>
                   </div>
               </div>
