@@ -25,7 +25,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean, targets: string[] }>({ isOpen: false, targets: [] });
 
-  // 辅助函数：根据 Key 获取 Item 对象
   const getItemByKey = (key: string) => files.find(f => f.key === key);
 
   const viewItems = useMemo(() => {
@@ -50,7 +49,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                 items.push({
                     key: currentPath + folderName + '/', name: folderName, displayName: folderName,
                     type: 'folder', size: 0, uploadedAt: file.uploadedAt, isFolder: true,
-                    // 文件夹没有 fileId
                     fileId: undefined 
                 });
             }
@@ -59,7 +57,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     return items.sort((a, b) => (b.isFolder ? 1 : 0) - (a.isFolder ? 1 : 0) || b.uploadedAt - a.uploadedAt);
   }, [files, currentPath, searchQuery]);
 
-  // --- 快捷键 ---
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
         if (['input', 'textarea'].includes(document.activeElement?.tagName.toLowerCase() || '')) return;
@@ -147,11 +144,10 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     } catch(e) { toast.dismiss(toastId); toast.error(e.message || '移动失败'); }
   };
 
-  // 修改：获取直链 (传入 item 对象)
   const handleCopyLink = (key: string) => {
       const item = getItemByKey(key);
       if (!item || item.type === 'folder') return;
-      const url = api.getFileUrl(item); // 传入完整对象
+      const url = api.getFileUrl(item); 
       if (url) {
           navigator.clipboard.writeText(url);
           toast.success('直链已复制');
@@ -218,7 +214,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                }
            }}
       >
-          {/* 工具栏 */}
           <div className="px-4 py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20 h-14">
              <div className="flex items-center gap-2 overflow-hidden flex-1">
                 <button className="sm:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full" onClick={() => setShowSidebar(true)}><Menu className="w-5 h-5" /></button>
@@ -234,7 +229,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                                 <button onClick={(e) => { 
                                     e.stopPropagation(); 
                                     const item = getItemByKey(Array.from(selection)[0]);
-                                    if(item) window.open(api.getFileUrl(item), '_blank'); 
+                                    if(item && item.type !== 'folder') window.open(api.getFileUrl(item), '_blank'); 
                                 }} className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-blue-600" title="打开/下载"><Download className="w-4 h-4" /></button>
                                 
                                 <button onClick={(e) => { 
