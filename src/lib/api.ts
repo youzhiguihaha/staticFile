@@ -1,7 +1,5 @@
-// src/lib/api.ts
-
 export interface FolderItem {
-  key: string; // 'a/b/'
+  key: string;
   folderId: string;
   name: string;
   type: 'folder';
@@ -11,7 +9,7 @@ export interface FolderItem {
 }
 
 export interface FileItem {
-  key: string; // 'a/b/x.js'
+  key: string;
   fileId: string;
   name: string;
   type: string;
@@ -84,7 +82,7 @@ export const api = {
     const token = this.getToken();
     const qs = new URLSearchParams({ fid: folderId, path }).toString();
     const res = await fetch(`/api/list?${qs}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) throw new Error('API Error');
+    if (!res.ok) throw new Error(await res.text());
     return await res.json();
   },
 
@@ -96,7 +94,7 @@ export const api = {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ parentId, name }),
     });
-    if (!res.ok) throw new Error('Create folder failed');
+    if (!res.ok) throw new Error(await res.text());
   },
 
   async upload(files: File[], folderId: string): Promise<void> {
@@ -116,7 +114,7 @@ export const api = {
       headers: { Authorization: `Bearer ${token}` },
       body: form,
     });
-    if (!res.ok) throw new Error('Upload failed');
+    if (!res.ok) throw new Error(await res.text());
   },
 
   async move(items: MoveItem[], targetFolderId: string): Promise<void> {
