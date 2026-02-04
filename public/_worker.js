@@ -9,11 +9,20 @@ function uuidv4() {
 const MIME_TYPES = {
   'js': 'application/javascript; charset=utf-8',
   'json': 'application/json; charset=utf-8',
+  'txt': 'text/plain; charset=utf-8',
   'css': 'text/css; charset=utf-8',
   'html': 'text/html; charset=utf-8',
-  'txt': 'text/plain; charset=utf-8',
-  'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-  'mp3': 'audio/mpeg', 'lrc': 'text/plain; charset=utf-8'
+  'xml': 'application/xml; charset=utf-8',
+  'csv': 'text/csv; charset=utf-8',
+  'png': 'image/png', 
+  'jpg': 'image/jpeg', 
+  'jpeg': 'image/jpeg',
+  'gif': 'image/gif', 
+  'webp': 'image/webp', 
+  'svg': 'image/svg+xml',
+  'mp3': 'audio/mpeg', 
+  'lrc': 'text/plain; charset=utf-8',
+  'mp4': 'video/mp4'
 };
 
 export default {
@@ -34,6 +43,7 @@ const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': '*',
   'Access-Control-Allow-Headers': '*',
+  'Access-Control-Expose-Headers': 'Content-Length, Content-Range',
 };
 
 async function sha256(str) {
@@ -48,6 +58,7 @@ async function handleApi(request, env) {
     const password = env.PASSWORD || "admin"; 
     const passwordHash = await sha256(password);
 
+    // 登录
     if (url.pathname === '/api/login') {
       if (request.method !== 'POST') return new Response(null, { status: 405 });
       const body = await request.json();
@@ -59,9 +70,9 @@ async function handleApi(request, env) {
 
     const token = authHeader ? authHeader.replace('Bearer ', '') : '';
     if (token !== passwordHash) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
-    if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV Error' }), { status: 500 });
+    if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500 });
 
-    // --- 上传 (核心双 KV 逻辑) ---
+    // --- 上传 (文件使用双KV) ---
     if (url.pathname === '/api/upload') {
       const formData = await request.formData();
       const file = formData.get('file');
@@ -71,58 +82,61 @@ async function handleApi(request, env) {
       const safeName = file.name.replace(/[\/|]/g, '_'); 
       const pathPrefix = folder ? (folder.endsWith('/') ? folder : `${folder}/`) : '';
       
-      // 1. 物理内容 Key: file:<UUID>
+      // 1. 生成物理内容ID
       const fileId = `file:${uuidv4()}`;
-      
-      // 2. 逻辑路径 Key: path:folder/filename
-      // 为了排序，不加时间戳了，直接用路径 (覆盖旧文件)
+      // 2. 生成逻辑路径Key (不加时间戳前缀，直接覆盖，符合文件系统直觉)
       const pathKey = `path:${pathPrefix}${safeName}`;
 
-      // 存内容
+      // 存物理内容
       await env.MY_BUCKET.put(fileId, file.stream(), {
           metadata: { type: file.type, size: file.size, name: safeName }
       });
 
       // 存路径映射
       const meta = {
-          fileId: fileId, // 关联物理文件
+          fileId: fileId,
           name: safeName,
           type: file.type,
           size: file.size,
           uploadedAt: Date.now()
       };
-      // 注意：这里把 meta 同时也写进 value，方便读取
       await env.MY_BUCKET.put(pathKey, JSON.stringify(meta), { metadata: meta });
 
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // --- 新建文件夹 (单 KV) ---
+    // --- 新建文件夹 (简单路径标记) ---
     if (url.pathname === '/api/create-folder') {
       const { path } = await request.json(); // path: "A/B/"
-      // 直接存 path:A/B/，Value 空
-      const folderKey = `path:${path}`;
-      const folderName = path.split('/').filter(Boolean).pop();
+      // 确保以 / 结尾
+      const safePath = path.endsWith('/') ? path : `${path}/`;
+      const folderKey = `path:${safePath}`;
+      const folderName = safePath.split('/').filter(Boolean).pop();
+      
+      // 存一个标记
       await env.MY_BUCKET.put(folderKey, 'folder', {
         metadata: { name: folderName, type: 'folder', uploadedAt: Date.now() }
       });
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // --- 列表 ---
+    // --- 列表 (修复：正确识别文件夹) ---
     if (url.pathname === '/api/list') {
       let files = [];
-      let listParams = { prefix: 'path:', limit: 1000 }; // 只扫描逻辑路径
+      let listParams = { prefix: 'path:', limit: 1000 };
       let listing;
       do {
           listing = await env.MY_BUCKET.list(listParams);
           for (const k of listing.keys) {
               const realPath = k.name.slice(5); // 去掉 path:
+              // 判定是否为文件夹: metadata标记 或 路径以/结尾
+              const isFolder = k.metadata?.type === 'folder' || realPath.endsWith('/');
+              
               files.push({ 
                   key: realPath,
                   ...k.metadata,
-                  // 如果是文件，元数据里应该有 fileId
-                  fileId: k.metadata?.fileId
+                  fileId: isFolder ? null : (k.metadata?.fileId || null),
+                  type: isFolder ? 'folder' : (k.metadata?.type || 'unknown')
               });
           }
           listParams.cursor = listing.cursor;
@@ -132,9 +146,9 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true, files }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
     
-    // --- 移动 (只改 path，不动 file) ---
+    // --- 移动 (只改 path) ---
     if (url.pathname === '/api/move') {
-        const { sourceKey, targetPath } = await request.json(); // sourceKey: "A/b.jpg"
+        const { sourceKey, targetPath } = await request.json(); 
         const safeTargetPrefix = targetPath ? (targetPath.endsWith('/') ? targetPath : `${targetPath}/`) : '';
         const fullSourceKey = `path:${sourceKey}`;
         
@@ -151,12 +165,11 @@ async function handleApi(request, env) {
                     const suffix = oldKey.slice(fullSourceKey.length); 
                     const folderName = sourceKey.split('/').filter(Boolean).pop();
                     const newKey = `path:${safeTargetPrefix}${folderName}/${suffix}`;
-                    
                     if (oldKey === newKey) continue;
                     
-                    // 读取原 path 的 Value (元数据)
                     const val = await env.MY_BUCKET.get(oldKey);
-                    if (val) { // val 可能是 'folder' 或 JSON
+                    // 移动时保留 metadata (fileId 在里面)
+                    if (val) {
                         await env.MY_BUCKET.put(newKey, val, { metadata: item.metadata });
                         await env.MY_BUCKET.delete(oldKey);
                     }
@@ -175,25 +188,23 @@ async function handleApi(request, env) {
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // --- 批量删除 (联动删除) ---
+    // --- 批量删除 (联动删物理文件) ---
     if (url.pathname === '/api/batch-delete') {
-       const { keys } = await request.json(); // keys: ["A/b.jpg"]
+       const { keys } = await request.json(); 
        for (const uiKey of keys) {
          const targetKey = `path:${uiKey}`;
          
-         // 1. 如果是文件，先读 fileId 并删除物理文件
+         // 1. 删除文件
          if (!targetKey.endsWith('/')) {
              const metaStr = await env.MY_BUCKET.get(targetKey);
              try {
                  const meta = JSON.parse(metaStr);
-                 if (meta && meta.fileId) {
-                     await env.MY_BUCKET.delete(meta.fileId); 
-                 }
+                 if (meta && meta.fileId) await env.MY_BUCKET.delete(meta.fileId); 
              } catch(e) {} 
              await env.MY_BUCKET.delete(targetKey); 
          }
          
-         // 2. 如果是文件夹，递归删除
+         // 2. 递归删除文件夹
          if (targetKey.endsWith('/')) {
              await env.MY_BUCKET.delete(targetKey);
              let listParams = { prefix: targetKey };
@@ -201,11 +212,14 @@ async function handleApi(request, env) {
              do {
                 listing = await env.MY_BUCKET.list(listParams);
                 for (const subKey of listing.keys) {
-                    const subMetaStr = await env.MY_BUCKET.get(subKey.name);
-                    try {
-                        const subMeta = JSON.parse(subMetaStr);
-                        if (subMeta && subMeta.fileId) await env.MY_BUCKET.delete(subMeta.fileId);
-                    } catch(e) {}
+                    // 如果子项是文件，也要删 fileId
+                    if (!subKey.name.endsWith('/')) {
+                        const subMetaStr = await env.MY_BUCKET.get(subKey.name);
+                        try {
+                            const subMeta = JSON.parse(subMetaStr);
+                            if (subMeta && subMeta.fileId) await env.MY_BUCKET.delete(subMeta.fileId);
+                        } catch(e) {}
+                    }
                     await env.MY_BUCKET.delete(subKey.name);
                 }
                 listParams.cursor = listing.cursor;
@@ -217,26 +231,25 @@ async function handleApi(request, env) {
     return new Response('Not Found', { status: 404, headers: corsHeaders });
 }
 
-// --- 直链下载 (只认 file:ID) ---
+// --- 直链下载 (核心: 读物理ID，Buffer模式) ---
 async function handleFile(request, env) {
   try {
     const url = new URL(request.url);
-    // 格式: /file/file:UUID.js
+    // URL格式: /file/file:UUID.js
     let pathPart = url.pathname.replace('/file/', '');
     let fileId = decodeURIComponent(pathPart);
     
-    // 去掉可能的后缀
+    // 去掉可能的伪后缀
     const lastDot = fileId.lastIndexOf('.');
     if (lastDot > 0) fileId = fileId.substring(0, lastDot);
 
-    // 安全检查
+    // 安全校验
     if (!fileId.startsWith('file:')) return new Response('Invalid File ID', { status: 400 });
 
     const ext = pathPart.split('.').pop().toLowerCase();
-    const isScript = ['js', 'json', 'txt', 'css'].includes(ext);
+    const isScript = ['js', 'json', 'txt', 'css', 'lrc', 'xml', 'md'].includes(ext);
     
-    // 使用 arrayBuffer 读取 (Buffer-First 策略)
-    // 这是你之前验证过可行的方案
+    // 脚本强制内存读取 (Anti-ECONNRESET)
     const fetchType = isScript ? 'arrayBuffer' : 'stream';
 
     const { value, metadata } = await env.MY_BUCKET.getWithMetadata(fileId, { type: fetchType });
@@ -249,11 +262,12 @@ async function handleFile(request, env) {
     else headers.set('Content-Type', metadata?.type || 'application/octet-stream');
 
     if (fetchType === 'arrayBuffer') {
+      // 内存模式：精确长度 + 关闭连接 + 禁止变换
       headers.set('Content-Length', value.byteLength.toString());
-      // 脚本强制短连接 + 禁止缓存变换
       headers.set('Connection', 'close');
-      headers.set('Cache-Control', 'no-transform');
+      headers.set('Cache-Control', 'no-transform, no-cache');
     } else {
+        // 流模式：常规处理
         if (metadata?.size) headers.set('Content-Length', metadata.size.toString());
         headers.set('Connection', 'keep-alive');
         headers.set('Cache-Control', 'public, max-age=86400');
