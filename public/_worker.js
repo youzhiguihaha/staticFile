@@ -1,16 +1,86 @@
 // _worker.js
 
-// 生成 12 位纯字母数字 ID
+// ===== Utilities =====
 function shortId() {
   const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
   let result = '';
   const randomValues = crypto.getRandomValues(new Uint8Array(12));
-  for (let i = 0; i < 12; i++) {
-    result += chars[randomValues[i] % chars.length];
-  }
+  for (let i = 0; i < 12; i++) result += chars[randomValues[i] % chars.length];
   return result;
 }
 
+function now() {
+  return Date.now();
+}
+
+function safeName(name) {
+  return (name || '').replace(/[\/|]/g, '_').trim();
+}
+
+function splitExt(filename) {
+  const idx = filename.lastIndexOf('.');
+  if (idx <= 0) return { base: filename, ext: '' };
+  return { base: filename.slice(0, idx), ext: filename.slice(idx) };
+}
+
+function makeUniqueName(existingNamesSet, desiredName) {
+  if (!existingNamesSet.has(desiredName)) return desiredName;
+  const { base, ext } = splitExt(desiredName);
+  let i = 1;
+  while (true) {
+    const candidate = `${base}(${i})${ext}`;
+    if (!existingNamesSet.has(candidate)) return candidate;
+    i++;
+  }
+}
+
+function json(data, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS, ...extraHeaders },
+  });
+}
+
+function bad(msg, status = 400) {
+  return new Response(msg, { status, headers: BASE_CORS });
+}
+
+function ctEqual(a, b) {
+  // constant-time compare for Uint8Array
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a[i] ^ b[i];
+  return r === 0;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex) {
+  const clean = (hex || '').trim();
+  if (!clean || clean.length % 2 !== 0) return new Uint8Array();
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function base64UrlEncode(bytes) {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function base64UrlDecodeToBytes(b64url) {
+  let s = (b64url || '').replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// ===== MIME =====
 const MIME_TYPES = {
   js: 'application/javascript; charset=utf-8',
   json: 'application/json; charset=utf-8',
@@ -30,22 +100,159 @@ const MIME_TYPES = {
   mp4: 'video/mp4',
 };
 
-// 更稳的 CORS：显式列出常用头，支持 HEAD
 const BASE_CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, HEAD',
   'Access-Control-Allow-Headers': 'Authorization, Content-Type, Range',
   'Access-Control-Max-Age': '86400',
-  // 让前端/客户端能读取这些响应头（可选但建议）
-  'Access-Control-Expose-Headers': 'Content-Type, Content-Length, Content-Disposition',
+  'Access-Control-Expose-Headers': 'Content-Type, Content-Length, Content-Disposition, ETag',
 };
 
+// ===== Storage Keys =====
+const ROOT_ID = 'root';
+const TRASH_ID = 'trash';
+const IDX_PREFIX = 'idx:';
+const BLOB_PREFIX = 'blob:';
+
+function idxKey(folderId) {
+  return `${IDX_PREFIX}${folderId}`;
+}
+function blobKey(fileId) {
+  return `${BLOB_PREFIX}${fileId}`;
+}
+
+// ===== KV Index Format =====
+// idx:<folderId> => { v:1, updatedAt:number, items: { [id]: Entry } }
+// Entry (file): { id, kind:'file', name, type, size, uploadedAt, deletedAt?, origParentId? }
+// Entry (folder): { id, kind:'folder', name, uploadedAt, deletedAt?, origParentId? }
+
+async function getFolderIndex(env, folderId) {
+  const raw = await env.MY_BUCKET.get(idxKey(folderId));
+  if (!raw) return { v: 1, updatedAt: 0, items: {} };
+  try {
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== 'object' || !obj.items) return { v: 1, updatedAt: 0, items: {} };
+    return obj;
+  } catch {
+    return { v: 1, updatedAt: 0, items: {} };
+  }
+}
+
+async function putFolderIndex(env, folderId, indexObj) {
+  indexObj.v = 1;
+  indexObj.updatedAt = now();
+  // 重要：每次请求对同一 idx key 最多写一次，避免触发 1/sec 限制
+  await env.MY_BUCKET.put(idxKey(folderId), JSON.stringify(indexObj));
+}
+
+function sortEntries(entries) {
+  // folders first, then by uploadedAt desc
+  return entries.sort((a, b) => {
+    const af = a.kind === 'folder' ? 0 : 1;
+    const bf = b.kind === 'folder' ? 0 : 1;
+    if (af !== bf) return af - bf;
+    return (b.uploadedAt || 0) - (a.uploadedAt || 0);
+  });
+}
+
+// ===== Auth: PBKDF2 password hash + HMAC token =====
+const PBKDF2_ITERATIONS = 210_000; // 够用且不算太慢（你可自行调）
+const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 12h
+
+async function pbkdf2Sha256(password, saltBytes, iterations = PBKDF2_ITERATIONS) {
+  const pwKey = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: saltBytes, iterations },
+    pwKey,
+    256
+  );
+  return new Uint8Array(bits);
+}
+
+async function hmacSign(secret, dataBytes) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, dataBytes);
+  return new Uint8Array(sig);
+}
+
+async function issueToken(env) {
+  const iat = Math.floor(Date.now() / 1000);
+  const exp = Math.floor((Date.now() + TOKEN_TTL_MS) / 1000);
+  const payload = { iat, exp };
+  const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+  const payloadB64 = base64UrlEncode(payloadBytes);
+
+  const secret = env.TOKEN_SECRET || '';
+  if (!secret) throw new Error('Missing TOKEN_SECRET');
+
+  const sigBytes = await hmacSign(secret, new TextEncoder().encode(payloadB64));
+  const sigB64 = base64UrlEncode(sigBytes);
+
+  return `${payloadB64}.${sigB64}`;
+}
+
+async function verifyToken(env, authHeader) {
+  if (!authHeader) return { ok: false, reason: 'no auth' };
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+  const parts = token.split('.');
+  if (parts.length !== 2) return { ok: false, reason: 'bad token' };
+
+  const [payloadB64, sigB64] = parts;
+  const secret = env.TOKEN_SECRET || '';
+  if (!secret) return { ok: false, reason: 'Missing TOKEN_SECRET' };
+
+  const expectedSig = await hmacSign(secret, new TextEncoder().encode(payloadB64));
+  const gotSig = base64UrlDecodeToBytes(sigB64);
+  if (!ctEqual(expectedSig, gotSig)) return { ok: false, reason: 'bad signature' };
+
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(base64UrlDecodeToBytes(payloadB64)));
+  } catch {
+    return { ok: false, reason: 'bad payload' };
+  }
+  const exp = payload?.exp;
+  if (!exp || typeof exp !== 'number') return { ok: false, reason: 'no exp' };
+  if (Math.floor(Date.now() / 1000) >= exp) return { ok: false, reason: 'expired' };
+
+  return { ok: true, payload };
+}
+
+async function verifyPassword(env, plainPassword) {
+  // 强安全模式：使用 PBKDF2 + salt + hash（推荐）
+  const saltHex = env.PASSWORD_SALT_HEX || '';
+  const hashHex = env.PASSWORD_HASH_HEX || '';
+  if (saltHex && hashHex) {
+    const saltBytes = hexToBytes(saltHex);
+    const derived = await pbkdf2Sha256(plainPassword, saltBytes);
+    const derivedHex = bytesToHex(derived);
+    // 常量时间比较
+    const a = new TextEncoder().encode(derivedHex);
+    const b = new TextEncoder().encode(hashHex.toLowerCase());
+    return ctEqual(a, b);
+  }
+
+  // 兼容模式（不推荐）：回退到明文 env.PASSWORD
+  const pw = env.PASSWORD || 'admin';
+  return plainPassword === pw;
+}
+
+// ===== Worker Entrypoint =====
 export default {
   async fetch(request, env) {
-    // 1) 全局 CORS 预检
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: BASE_CORS });
-    }
+    if (request.method === 'OPTIONS') return new Response(null, { headers: BASE_CORS });
 
     try {
       const url = new URL(request.url);
@@ -53,287 +260,341 @@ export default {
       if (url.pathname.startsWith('/api/')) return handleApi(request, env);
       if (url.pathname.startsWith('/file/')) return handleFile(request, env);
 
-      // Pages 静态资源
       return env.ASSETS.fetch(request);
     } catch (e) {
-      // 捕获所有运行时错误，返回 500
       return new Response(e?.message || 'Internal Error', { status: 500, headers: BASE_CORS });
     }
   },
 };
 
-async function sha256(str) {
-  const buf = new TextEncoder().encode(str);
-  const hash = await crypto.subtle.digest('SHA-256', buf);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
+// ===== API =====
 async function handleApi(request, env) {
   const url = new URL(request.url);
-  const authHeader = request.headers.get('Authorization');
-  const password = env.PASSWORD || 'admin';
-  const passwordHash = await sha256(password);
 
-  // login
+  if (!env.MY_BUCKET) return json({ error: 'KV未绑定' }, 500);
+
+  // ---- LOGIN ----
   if (url.pathname === '/api/login') {
-    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
-    const body = await request.json();
-    if (body.password === password) {
-      return new Response(JSON.stringify({ success: true, token: passwordHash }), {
-        headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-      });
-    }
-    return new Response(JSON.stringify({ success: false }), { status: 401, headers: BASE_CORS });
+    if (request.method !== 'POST') return bad('Method Not Allowed', 405);
+    const body = await request.json().catch(() => ({}));
+    const ok = await verifyPassword(env, body.password || '');
+    if (!ok) return json({ success: false }, 401);
+
+    const token = await issueToken(env);
+    return json({ success: true, token });
   }
 
-  // auth
-  const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-  if (token !== passwordHash) return new Response('Unauthorized', { status: 401, headers: BASE_CORS });
+  // ---- AUTH REQUIRED ----
+  const auth = await verifyToken(env, request.headers.get('Authorization'));
+  if (!auth.ok) return bad('Unauthorized', 401);
 
-  if (!env.MY_BUCKET) {
-    return new Response(JSON.stringify({ error: 'KV未绑定' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-    });
+  // ---- LIST FOLDER ----
+  if (url.pathname === '/api/list-folder') {
+    const folderId = url.searchParams.get('folderId') || ROOT_ID;
+    const idx = await getFolderIndex(env, folderId);
+    const items = sortEntries(Object.values(idx.items || {}));
+    return json({ success: true, folderId, items, updatedAt: idx.updatedAt || 0 });
   }
 
-  // upload
+  // ---- CREATE FOLDER ----
+  if (url.pathname === '/api/create-folder') {
+    if (request.method !== 'POST') return bad('Method Not Allowed', 405);
+    const body = await request.json().catch(() => ({}));
+    const parentId = body.parentId || ROOT_ID;
+    const nameRaw = safeName(body.name || '');
+    if (!nameRaw) return bad('Invalid name', 400);
+
+    const parentIdx = await getFolderIndex(env, parentId);
+
+    const existingNames = new Set(Object.values(parentIdx.items).map(x => x.name));
+    const name = makeUniqueName(existingNames, nameRaw);
+
+    const folderId = `f_${shortId()}`;
+    parentIdx.items[folderId] = {
+      id: folderId,
+      kind: 'folder',
+      name,
+      uploadedAt: now(),
+    };
+
+    await putFolderIndex(env, parentId, parentIdx);
+
+    // 注意：不强制创建 idx:<folderId>，懒创建（省一次写入）
+    return json({ success: true, folderId, name });
+  }
+
+  // ---- UPLOAD (multi files, one index write) ----
   if (url.pathname === '/api/upload') {
-    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+    if (request.method !== 'POST') return bad('Method Not Allowed', 405);
 
     const formData = await request.formData();
-    const file = formData.get('file');
-    const folder = formData.get('folder') || '';
-    if (!file) return new Response('No file', { status: 400, headers: BASE_CORS });
+    const folderId = (formData.get('folderId') || ROOT_ID).toString();
+    const files = formData.getAll('file').filter(x => x && typeof x === 'object');
 
-    const safeName = file.name.replace(/[\/|]/g, '_');
-    const pathPrefix = folder ? (folder.endsWith('/') ? folder : `${folder}/`) : '';
+    if (!files.length) return bad('No file', 400);
 
-    const parts = safeName.split('.');
-    const ext = parts.length > 1 ? `.${parts.pop()}` : '';
-    const fileId = `${shortId()}${ext}`;
+    const idx = await getFolderIndex(env, folderId);
+    const existingNames = new Set(Object.values(idx.items).map(x => x.name));
 
-    const pathKey = `path:${pathPrefix}${safeName}`;
+    for (const f of files) {
+      const file = f; // File
+      const rawName = safeName(file.name || 'file');
+      const uniqueName = makeUniqueName(existingNames, rawName);
+      existingNames.add(uniqueName);
 
-    // 先存文件本体（KV 单值限制 25MiB，超过会失败）
-    await env.MY_BUCKET.put(fileId, file.stream(), {
-      metadata: { type: file.type, size: file.size, name: safeName, uploadedAt: Date.now() },
-    });
+      const ext = (() => {
+        const p = uniqueName.split('.');
+        return p.length > 1 ? '.' + p[p.length - 1] : '';
+      })();
+      const fileId = `${shortId()}${ext}`;
+      const meta = { type: file.type || '', size: file.size || 0, name: uniqueName, uploadedAt: now() };
 
-    // 再存索引（路径 -> meta）
-    const meta = {
-      fileId,
-      name: safeName,
-      type: file.type,
-      size: file.size,
-      uploadedAt: Date.now(),
-    };
-    await env.MY_BUCKET.put(pathKey, JSON.stringify(meta), { metadata: meta });
+      await env.MY_BUCKET.put(blobKey(fileId), file.stream(), { metadata: meta });
 
-    return new Response(JSON.stringify({ success: true }), {
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-    });
+      idx.items[fileId] = {
+        id: fileId,
+        kind: 'file',
+        name: uniqueName,
+        type: file.type || 'application/octet-stream',
+        size: file.size || 0,
+        uploadedAt: meta.uploadedAt,
+      };
+    }
+
+    await putFolderIndex(env, folderId, idx);
+    return json({ success: true });
   }
 
-  // create folder
-  if (url.pathname === '/api/create-folder') {
-    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
-
-    const { path } = await request.json();
-    const safePath = path.endsWith('/') ? path : `${path}/`;
-    const folderKey = `path:${safePath}`;
-    const folderName = safePath.split('/').filter(Boolean).pop();
-
-    await env.MY_BUCKET.put(folderKey, 'folder', {
-      metadata: { name: folderName, type: 'folder', uploadedAt: Date.now() },
-    });
-
-    return new Response(JSON.stringify({ success: true }), {
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-    });
-  }
-
-  // list
-  if (url.pathname === '/api/list') {
-    let files = [];
-    let listParams = { prefix: 'path:', limit: 1000 };
-    let listing;
-
-    do {
-      listing = await env.MY_BUCKET.list(listParams);
-      for (const k of listing.keys) {
-        const realPath = k.name.slice(5); // remove "path:"
-        const isFolder = k.metadata?.type === 'folder' || realPath.endsWith('/');
-        files.push({
-          key: realPath,
-          ...k.metadata,
-          fileId: isFolder ? null : (k.metadata?.fileId || null),
-          type: isFolder ? 'folder' : (k.metadata?.type || 'unknown'),
-        });
-      }
-      listParams.cursor = listing.cursor;
-    } while (listing.list_complete === false);
-
-    files.sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
-    return new Response(JSON.stringify({ success: true, files }), {
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-    });
-  }
-
-  // move
+  // ---- MOVE (batch, grouped by fromFolderId) ----
   if (url.pathname === '/api/move') {
-    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+    if (request.method !== 'POST') return bad('Method Not Allowed', 405);
+    const body = await request.json().catch(() => ({}));
+    const toFolderId = body.toFolderId || ROOT_ID;
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) return bad('No items', 400);
 
-    const { sourceKey, targetPath } = await request.json();
-    const safeTargetPrefix = targetPath ? (targetPath.endsWith('/') ? targetPath : `${targetPath}/`) : '';
-    const fullSourceKey = `path:${sourceKey}`;
+    // dest index read once
+    const destIdx = await getFolderIndex(env, toFolderId);
+    const destNames = new Set(Object.values(destIdx.items).map(x => x.name));
 
-    // 防止把文件夹移动到自己子目录
-    if (fullSourceKey.endsWith('/') && `path:${safeTargetPrefix}`.startsWith(fullSourceKey)) {
-      return new Response('Error', { status: 400, headers: BASE_CORS });
+    // group by source folder
+    const groups = new Map();
+    for (const it of items) {
+      const from = it.fromFolderId || ROOT_ID;
+      if (!groups.has(from)) groups.set(from, []);
+      groups.get(from).push(it.id);
     }
 
-    const isFolder = fullSourceKey.endsWith('/');
+    for (const [fromFolderId, ids] of groups.entries()) {
+      if (fromFolderId === toFolderId) continue;
 
-    if (isFolder) {
-      let listParams = { prefix: fullSourceKey };
-      let listing;
+      const srcIdx = await getFolderIndex(env, fromFolderId);
+      let changed = false;
 
-      do {
-        listing = await env.MY_BUCKET.list(listParams);
-        for (const item of listing.keys) {
-          const oldKey = item.name;
-          const suffix = oldKey.slice(fullSourceKey.length);
-          const folderName = sourceKey.split('/').filter(Boolean).pop();
-          const newKey = `path:${safeTargetPrefix}${folderName}/${suffix}`;
-          if (oldKey === newKey) continue;
+      for (const id of ids) {
+        const entry = srcIdx.items[id];
+        if (!entry) continue;
 
-          const val = await env.MY_BUCKET.get(oldKey);
-          if (val) {
-            await env.MY_BUCKET.put(newKey, val, { metadata: item.metadata });
-            await env.MY_BUCKET.delete(oldKey);
-          }
-        }
-        listParams.cursor = listing.cursor;
-      } while (listing.list_complete === false);
-    } else {
-      const fileName = sourceKey.split('/').pop();
-      const newKey = `path:${safeTargetPrefix}${fileName}`;
+        // 防止同名冲突：目标目录自动改名
+        const newName = makeUniqueName(destNames, entry.name);
+        destNames.add(newName);
 
-      const { value, metadata } = await env.MY_BUCKET.getWithMetadata(fullSourceKey);
-      if (value) {
-        await env.MY_BUCKET.put(newKey, value, { metadata });
-        await env.MY_BUCKET.delete(fullSourceKey);
+        // 从源删
+        delete srcIdx.items[id];
+        changed = true;
+
+        // 入目标（只改 name，不动 id）
+        destIdx.items[id] = { ...entry, name: newName };
       }
+
+      if (changed) await putFolderIndex(env, fromFolderId, srcIdx);
     }
 
-    return new Response(JSON.stringify({ success: true }), {
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-    });
+    // 目标写一次
+    await putFolderIndex(env, toFolderId, destIdx);
+    return json({ success: true });
   }
 
-  // batch-delete
+  // ---- SOFT DELETE (default): move to trash; HARD delete optional ----
   if (url.pathname === '/api/batch-delete') {
-    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+    if (request.method !== 'POST') return bad('Method Not Allowed', 405);
+    const body = await request.json().catch(() => ({}));
+    const hard = !!body.hard;
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) return bad('No items', 400);
 
-    const { keys } = await request.json();
+    if (!hard) {
+      // soft delete => move into trash (0 blob deletes)
+      const trashIdx = await getFolderIndex(env, TRASH_ID);
+      const trashNames = new Set(Object.values(trashIdx.items).map(x => x.name));
 
-    for (const uiKey of keys) {
-      const targetKey = `path:${uiKey}`;
-
-      // 删除文件
-      if (!targetKey.endsWith('/')) {
-        const metaStr = await env.MY_BUCKET.get(targetKey);
-        try {
-          const meta = JSON.parse(metaStr);
-          if (meta && meta.fileId) await env.MY_BUCKET.delete(meta.fileId);
-        } catch (e) {
-          // ignore
-        }
-        await env.MY_BUCKET.delete(targetKey);
+      const groups = new Map();
+      for (const it of items) {
+        const from = it.fromFolderId || ROOT_ID;
+        if (!groups.has(from)) groups.set(from, []);
+        groups.get(from).push(it.id);
       }
 
-      // 删除文件夹（含子项）
-      if (targetKey.endsWith('/')) {
-        await env.MY_BUCKET.delete(targetKey);
+      for (const [fromFolderId, ids] of groups.entries()) {
+        const srcIdx = await getFolderIndex(env, fromFolderId);
+        let changed = false;
 
-        let listParams = { prefix: targetKey };
-        let listing;
+        for (const id of ids) {
+          const entry = srcIdx.items[id];
+          if (!entry) continue;
 
-        do {
-          listing = await env.MY_BUCKET.list(listParams);
-          for (const subKey of listing.keys) {
-            if (!subKey.name.endsWith('/')) {
-              const subMetaStr = await env.MY_BUCKET.get(subKey.name);
-              try {
-                const subMeta = JSON.parse(subMetaStr);
-                if (subMeta && subMeta.fileId) await env.MY_BUCKET.delete(subMeta.fileId);
-              } catch (e) {
-                // ignore
-              }
-            }
-            await env.MY_BUCKET.delete(subKey.name);
-          }
-          listParams.cursor = listing.cursor;
-        } while (listing.list_complete === false);
+          delete srcIdx.items[id];
+          changed = true;
+
+          const newName = makeUniqueName(trashNames, entry.name);
+          trashNames.add(newName);
+
+          trashIdx.items[id] = {
+            ...entry,
+            name: newName,
+            deletedAt: now(),
+            origParentId: fromFolderId,
+          };
+        }
+
+        if (changed) await putFolderIndex(env, fromFolderId, srcIdx);
+      }
+
+      await putFolderIndex(env, TRASH_ID, trashIdx);
+      return json({ success: true, soft: true });
+    }
+
+    // hard delete: remove from folder index + delete blobs for files (folders会一起删掉“入口”，子树仍在KV里无法枚举，无KV.list无法完全清理)
+    // 为了“最大化不浪费资源”，强烈建议：平时用软删，偶尔在回收站 purge。
+    const groups = new Map();
+    for (const it of items) {
+      const from = it.fromFolderId || ROOT_ID;
+      if (!groups.has(from)) groups.set(from, []);
+      groups.get(from).push(it.id);
+    }
+
+    // 先从索引移除（每个来源目录写一次）
+    const toDeleteFileIds = [];
+    for (const [fromFolderId, ids] of groups.entries()) {
+      const srcIdx = await getFolderIndex(env, fromFolderId);
+      let changed = false;
+
+      for (const id of ids) {
+        const entry = srcIdx.items[id];
+        if (!entry) continue;
+        delete srcIdx.items[id];
+        changed = true;
+
+        if (entry.kind === 'file') toDeleteFileIds.push(id);
+        // folder hard delete：无 KV.list 很难完全清理其子树（你要“最大化利用”，建议软删+回收站集中清理）
+      }
+
+      if (changed) await putFolderIndex(env, fromFolderId, srcIdx);
+    }
+
+    // 再删 blob（消耗 delete 配额）
+    for (const fid of toDeleteFileIds) {
+      await env.MY_BUCKET.delete(blobKey(fid));
+    }
+
+    return json({ success: true, hard: true });
+  }
+
+  // ---- PURGE TRASH: truly delete file blobs from trash (hard) ----
+  if (url.pathname === '/api/purge-trash') {
+    if (request.method !== 'POST') return bad('Method Not Allowed', 405);
+    const body = await request.json().catch(() => ({}));
+    const ids = Array.isArray(body.ids) ? body.ids : [];
+    if (!ids.length) return bad('No ids', 400);
+
+    const trashIdx = await getFolderIndex(env, TRASH_ID);
+    let changed = false;
+    const deleteFileIds = [];
+
+    for (const id of ids) {
+      const entry = trashIdx.items[id];
+      if (!entry) continue;
+      delete trashIdx.items[id];
+      changed = true;
+
+      if (entry.kind === 'file') deleteFileIds.push(id);
+      // folder purge：同样无法无 list 完全删子树入口以外的数据（建议仍以软删为主）
+    }
+
+    if (changed) await putFolderIndex(env, TRASH_ID, trashIdx);
+
+    for (const fid of deleteFileIds) {
+      await env.MY_BUCKET.delete(blobKey(fid));
+    }
+
+    return json({ success: true });
+  }
+
+  // ---- SEARCH (reads only) ----
+  if (url.pathname === '/api/search') {
+    const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+    if (!q) return json({ success: true, items: [] });
+
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '200', 10) || 200, 500);
+    const results = [];
+
+    // BFS from root
+    const queue = [{ folderId: ROOT_ID, crumb: [] }]; // crumb: [{id,name}]
+    while (queue.length && results.length < limit) {
+      const { folderId, crumb } = queue.shift();
+      const idx = await getFolderIndex(env, folderId);
+
+      for (const entry of Object.values(idx.items)) {
+        if (results.length >= limit) break;
+
+        if ((entry.name || '').toLowerCase().includes(q)) {
+          // file -> crumb points to parent; folder -> crumbChild points to itself
+          const isFolder = entry.kind === 'folder';
+          const path = (crumb.map(x => x.name).join('/') + (crumb.length ? '/' : '') + entry.name + (isFolder ? '/' : ''));
+
+          results.push({
+            ...entry,
+            parentId: folderId,
+            path,
+            crumb: isFolder ? [...crumb, { id: entry.id, name: entry.name }] : crumb,
+          });
+        }
+
+        if (entry.kind === 'folder') {
+          queue.push({ folderId: entry.id, crumb: [...crumb, { id: entry.id, name: entry.name }] });
+        }
       }
     }
 
-    return new Response(JSON.stringify({ success: true }), {
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-    });
+    return json({ success: true, items: results });
   }
 
-  return new Response('Not Found', { status: 404, headers: BASE_CORS });
+  return bad('Not Found', 404);
 }
 
+// ===== File Download (public) =====
 async function handleFile(request, env) {
   try {
-    // 只允许 GET/HEAD（OPTIONS 在最外层已处理）
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return new Response('Method Not Allowed', { status: 405, headers: BASE_CORS });
     }
+    if (!env.MY_BUCKET) return new Response('KV not bound', { status: 500, headers: BASE_CORS });
 
     const url = new URL(request.url);
-    const pathPart = url.pathname.replace('/file/', '');
-    const fileId = decodeURIComponent(pathPart || '');
-
-    if (!fileId || fileId.length < 5) {
-      return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
-    }
-
-    if (!env.MY_BUCKET) {
-      return new Response('KV not bound', { status: 500, headers: BASE_CORS });
-    }
+    const fileId = decodeURIComponent(url.pathname.slice('/file/'.length) || '');
+    if (!fileId || fileId.length < 5) return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
 
     const ext = (fileId.split('.').pop() || '').toLowerCase();
 
-    /**
-     * 关键修复点：
-     * - 不用 KV stream 直接回传（容易在某些环境触发 ECONNRESET）
-     * - 改为 arrayBuffer
-     * - 不手动写 Content-Length（避免被压缩/分块后长度不一致导致连接重置）
-     */
-    const { value, metadata } = await env.MY_BUCKET.getWithMetadata(fileId, { type: 'arrayBuffer' });
+    // 用 arrayBuffer 更稳（避免某些环境 stream 导致 ECONNRESET）
+    const { value, metadata } = await env.MY_BUCKET.getWithMetadata(blobKey(fileId), { type: 'arrayBuffer' });
     if (!value) return new Response('File Not Found', { status: 404, headers: BASE_CORS });
 
     const headers = new Headers(BASE_CORS);
-
-    // Content-Type：优先扩展名映射，其次走 metadata.type
     headers.set('Content-Type', MIME_TYPES[ext] || metadata?.type || 'application/octet-stream');
-
-    // 缓存
     headers.set('Cache-Control', 'public, max-age=86400');
 
-    // 可选：让下载更友好（不影响洛雪）
-    // headers.set('Content-Disposition', `inline; filename="${encodeURIComponent(metadata?.name || fileId)}"`);
-
-    if (request.method === 'HEAD') {
-      return new Response(null, { headers });
-    }
-
+    if (request.method === 'HEAD') return new Response(null, { headers });
     return new Response(value, { headers });
   } catch (e) {
     return new Response(`File Error: ${e?.message || 'Unknown'}`, { status: 500, headers: BASE_CORS });
