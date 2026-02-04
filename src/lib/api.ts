@@ -1,6 +1,6 @@
 export interface FileItem {
-  key: string; // "A/B/c.jpg"
-  fileId?: string; // "file:UUID"
+  key: string;
+  fileId?: string;
   name: string;
   type: string;
   size: number;
@@ -53,7 +53,7 @@ export const api = {
     const res = await fetch('/api/list', { headers: { 'Authorization': `Bearer ${token}` } });
     if (res.ok) {
         const data = await res.json();
-        return data.files; // 直接返回
+        return data.files;
     }
     throw new Error('API Error');
   },
@@ -75,7 +75,6 @@ export const api = {
     // 自动过滤文件名非法字符
     const safeName = file.name.replace(/[\/|]/g, '_');
     const safeFile = new File([file], safeName, { type: file.type });
-    
     formData.append('file', safeFile);
     formData.append('folder', folderPath); 
     await fetch('/api/upload', {
@@ -91,7 +90,7 @@ export const api = {
     await fetch('/api/batch-delete', {
          method: 'POST',
          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-         body: JSON.stringify({ keys }) // 直接传 UI key
+         body: JSON.stringify({ keys }) 
     });
   },
 
@@ -105,22 +104,22 @@ export const api = {
     });
   },
 
-  // 关键：获取直链 (优先使用 fileId)
+  // 生成无前缀直链
   getFileUrl(item: FileItem | string) {
      let fileId = '';
      let fileName = '';
      
      if (typeof item === 'string') {
-         console.error("Use item object for getFileUrl");
+         console.error("Use item object");
          return '';
      } else {
-         fileId = item.fileId || ''; // 使用物理 ID
+         fileId = item.fileId || '';
          fileName = item.name;
      }
 
      if (!fileId) return '';
 
-     // 生成格式：/file/file:UUID.js
+     // 生成格式：/file/UUID.ext
      const ext = fileName.split('.').pop();
      const suffix = ext ? `.${ext}` : '';
      return `${window.location.origin}/file/${fileId}${suffix}`;
