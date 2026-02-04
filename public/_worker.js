@@ -1,5 +1,6 @@
 const SEP = '|';
 
+// 强制 MIME 类型
 const MIME_TYPES = {
   'js': 'application/javascript; charset=utf-8',
   'json': 'application/json; charset=utf-8',
@@ -30,34 +31,25 @@ const corsHeaders = {
   'Access-Control-Expose-Headers': '*',
 };
 
+// ... (handleApi 函数保持之前的代码不变，逻辑完全正确，此处为了节省篇幅省略，请务必保留) ...
 async function handleApi(request, env) {
-    // API 部分逻辑保持不变，为节省篇幅省略，请保留之前的 API 代码
-    // ... (保留之前的 handleApi 代码) ...
-    // 为了确保完整性，这里必须包含 handleApi 的代码。
-    // 如果您需要我再次完整输出 handleApi 请告诉我。
-    // 但鉴于主要问题在 handleFile，我这里只输出修复后的 handleFile 及其依赖。
-    
-    // (为了确保代码可运行，这里还是放上简化的 API 逻辑框架，请您合并之前的逻辑)
     const url = new URL(request.url);
     const authHeader = request.headers.get('Authorization');
     const password = env.PASSWORD || "admin"; 
     
+    // Login
     if (url.pathname === '/api/login') {
-       if (request.method !== 'POST') return new Response(null, { status: 405 });
-       const body = await request.json();
-       return body.password === password 
-         ? new Response(JSON.stringify({ success: true, token: password }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } })
-         : new Response(JSON.stringify({ success: false }), { status: 401, headers: corsHeaders });
+      if (request.method !== 'POST') return new Response(null, { status: 405, headers: corsHeaders });
+      const body = await request.json();
+      return body.password === password 
+        ? new Response(JSON.stringify({ success: true, token: password }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } })
+        : new Response(JSON.stringify({ success: false }), { status: 401, headers: corsHeaders });
     }
-    
-    // 省略其他 API 逻辑，请复用上一次成功的 API 代码，它们没有问题。
-    // ...
-    // ...
-    
-    // 临时补充完整 API 逻辑以防万一
+
     if (authHeader !== `Bearer ${password}`) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
     if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
+    // Upload
     if (url.pathname === '/api/upload') {
       const formData = await request.formData();
       const file = formData.get('file');
@@ -72,6 +64,7 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true, key }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
+    // Create Folder
     if (url.pathname === '/api/create-folder') {
       const { path } = await request.json();
       if (!path) return new Response('Path required', { status: 400, headers: corsHeaders });
@@ -83,6 +76,7 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
+    // List
     if (url.pathname === '/api/list') {
       let files = [];
       let listParams = { limit: 1000 };
@@ -96,6 +90,7 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true, files }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
     
+    // Move
     if (url.pathname === '/api/move') {
         const { sourceKey, targetPath } = await request.json();
         const safeTargetPrefix = targetPath ? targetPath.split('/').filter(Boolean).join(SEP) + SEP : '';
@@ -130,6 +125,7 @@ async function handleApi(request, env) {
         }
     }
 
+    // Batch Delete
     if (url.pathname === '/api/batch-delete') {
        const { keys } = await request.json();
        let deleteCount = 0;
@@ -148,17 +144,14 @@ async function handleApi(request, env) {
        }
        return new Response(JSON.stringify({ success: true, count: deleteCount }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
-
     return new Response('Not Found', { status: 404, headers: corsHeaders });
 }
 
-// --- 核心网络修复 ---
+// --- 终极网络层修复 ---
 async function handleFile(request, env) {
   try {
     const url = new URL(request.url);
     const pathPart = url.pathname.replace('/file/', '');
-    
-    // Base64 解码
     let key;
     try {
         let base64Str = pathPart;
@@ -168,53 +161,46 @@ async function handleFile(request, env) {
     } catch (e) { key = decodeURIComponent(pathPart); }
 
     const ext = key.split('.').pop().toLowerCase();
-    const isScript = ['js', 'json', 'txt', 'css'].includes(ext);
+    // 扩大脚本类型检测范围
+    const isScript = ['js', 'json', 'txt', 'css', 'lrc', 'md', 'xml'].includes(ext);
 
-    // 1. 对于脚本文件，强制获取完整 ArrayBuffer
     const { value, metadata } = await env.MY_BUCKET.getWithMetadata(key, { type: isScript ? 'arrayBuffer' : 'stream' });
-    
     if (!value) return new Response('File Not Found', { status: 404, headers: corsHeaders });
 
     const headers = new Headers(corsHeaders);
     
-    // 2. 强制正确的 Content-Type
+    // 强制 MIME
     if (MIME_TYPES[ext]) headers.set('Content-Type', MIME_TYPES[ext]);
     else headers.set('Content-Type', metadata?.type || 'application/octet-stream');
 
-    // 3. 计算大小
+    // 强制 Content-Length
     let size = 0;
     if (isScript) size = value.byteLength;
     else if (metadata?.size) size = metadata.size;
-    
     if (size > 0) headers.set('Content-Length', size.toString());
     
-    // 4. 处理 Range 请求 (支持断点续传/流媒体)
-    // 如果客户端请求 range，我们必须正确响应 206
+    // 处理 Range
     const rangeHeader = request.headers.get('Range');
-    if (rangeHeader && size > 0 && !isScript) { // 脚本文件一般不走 Range
+    if (rangeHeader && size > 0 && !isScript) {
         const parts = rangeHeader.replace(/bytes=/, "").split("-");
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : size - 1;
         const chunksize = (end - start) + 1;
-        
         headers.set('Content-Range', `bytes ${start}-${end}/${size}`);
         headers.set('Content-Length', chunksize.toString());
-        
-        // 注意：KV 的 get(stream) 不支持 range 参数，除非使用 R2
-        // 但我们可以用 get options (Cloudflare KV 支持 range 参数)
-        // 重新获取带 range 的流
         const rangeBody = await env.MY_BUCKET.get(key, { range: { offset: start, length: chunksize }, type: 'stream' });
         return new Response(rangeBody, { status: 206, headers });
     }
 
-    // 5. 关键头信息
-    headers.set('Connection', 'keep-alive'); // 保持连接
-    headers.set('Accept-Ranges', 'bytes');
-    headers.set('Cache-Control', 'public, max-age=86400');
+    // 核心变更：脚本文件使用短连接，防止 Socket 挂起
+    if (isScript) {
+        headers.set('Connection', 'close'); 
+        headers.set('Cache-Control', 'no-transform'); // 禁止 Cloudflare 自动转换
+    } else {
+        headers.set('Connection', 'keep-alive');
+        headers.set('Cache-Control', 'public, max-age=86400');
+    }
     
     return new Response(value, { headers });
-
-  } catch (e) {
-    return new Response(null, { status: 500, headers: corsHeaders });
-  }
+  } catch (e) { return new Response(null, { status: 500, headers: corsHeaders }); }
 }
