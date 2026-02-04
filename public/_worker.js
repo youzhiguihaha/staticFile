@@ -37,7 +37,6 @@ const BASE_CORS = {
 
 export default {
   async fetch(request, env) {
-    // 1. 全局 CORS 预检
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: BASE_CORS });
     }
@@ -50,7 +49,6 @@ export default {
       
       return env.ASSETS.fetch(request);
     } catch (e) {
-      // 捕获所有运行时错误，返回 500
       return new Response(e.message, { status: 500, headers: BASE_CORS });
     }
   }
@@ -81,6 +79,7 @@ async function handleApi(request, env) {
     if (token !== passwordHash) return new Response('Unauthorized', { status: 401, headers: BASE_CORS });
     if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500, headers: BASE_CORS });
 
+    // 上传 (核心修复：ID包含后缀)
     if (url.pathname === '/api/upload') {
       const formData = await request.formData();
       const file = formData.get('file');
@@ -90,11 +89,14 @@ async function handleApi(request, env) {
       const safeName = file.name.replace(/[\/|]/g, '_'); 
       const pathPrefix = folder ? (folder.endsWith('/') ? folder : `${folder}/`) : '';
       
-      // 生成带后缀的 ID
+      // 1. 获取后缀
       const parts = safeName.split('.');
       const ext = parts.length > 1 ? `.${parts.pop()}` : '';
+      
+      // 2. 生成 Key: 随机字符 + 后缀 (例如 u3g0k3b8.js)
       const fileId = `${shortId()}${ext}`; 
       
+      // 3. 逻辑路径
       const pathKey = `path:${pathPrefix}${safeName}`;
 
       await env.MY_BUCKET.put(fileId, file.stream(), {
@@ -113,6 +115,7 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
     }
 
+    // 新建文件夹
     if (url.pathname === '/api/create-folder') {
       const { path } = await request.json(); 
       const safePath = path.endsWith('/') ? path : `${path}/`;
@@ -124,6 +127,7 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
     }
 
+    // 列表
     if (url.pathname === '/api/list') {
       let files = [];
       let listParams = { prefix: 'path:', limit: 1000 };
@@ -146,6 +150,7 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true, files }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
     }
     
+    // 移动
     if (url.pathname === '/api/move') {
         const { sourceKey, targetPath } = await request.json(); 
         const safeTargetPrefix = targetPath ? (targetPath.endsWith('/') ? targetPath : `${targetPath}/`) : '';
@@ -164,7 +169,6 @@ async function handleApi(request, env) {
                     const folderName = sourceKey.split('/').filter(Boolean).pop();
                     const newKey = `path:${safeTargetPrefix}${folderName}/${suffix}`;
                     if (oldKey === newKey) continue;
-                    
                     const val = await env.MY_BUCKET.get(oldKey);
                     if (val) {
                         await env.MY_BUCKET.put(newKey, val, { metadata: item.metadata });
@@ -185,6 +189,7 @@ async function handleApi(request, env) {
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
     }
 
+    // 批量删除
     if (url.pathname === '/api/batch-delete') {
        const { keys } = await request.json(); 
        for (const uiKey of keys) {
@@ -222,20 +227,20 @@ async function handleApi(request, env) {
     return new Response('Not Found', { status: 404, headers: BASE_CORS });
 }
 
+// --- 文件直链 ---
 async function handleFile(request, env) {
   try {
     const url = new URL(request.url);
-    let pathPart = url.pathname.replace('/file/', '');
-    // 直接解码使用，不进行任何截断
-    let fileId = decodeURIComponent(pathPart);
+    // URL格式: /file/u3g0k3b8.js
+    let fileId = decodeURIComponent(url.pathname.replace('/file/', ''));
     
-    // 安全检查：至少有后缀
-    if (fileId.length < 3) return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
+    if (fileId.length < 5) return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
 
     const ext = fileId.split('.').pop().toLowerCase();
     
-    // 使用 stream 模式，但手动控制 Headers
+    // 使用 stream 模式
     const { value, metadata } = await env.MY_BUCKET.getWithMetadata(fileId, { type: 'stream' });
+    
     if (!value) return new Response('File Not Found', { status: 404, headers: BASE_CORS });
 
     const headers = new Headers(BASE_CORS);
@@ -248,8 +253,9 @@ async function handleFile(request, env) {
         headers.set('Content-Length', metadata.size.toString());
     }
 
+    // 关键：Connection: close 解决 ECONNRESET
+    headers.set('Connection', 'close');
     headers.set('Cache-Control', 'public, max-age=86400');
-    // 不强制 Encoding，让 Cloudflare 自动处理
     
     return new Response(value, { headers });
 
