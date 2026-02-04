@@ -1,3 +1,4 @@
+// src/components/FolderTree.tsx
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Folder, FolderOpen, ChevronRight, ChevronDown, Check } from 'lucide-react';
 import { api, FolderItem, MoveItem } from '../lib/api';
@@ -13,33 +14,40 @@ export type SharedTreeState = {
   nodeInfoRef: React.MutableRefObject<Map<string, { folderId: string; name: string; path: string }>>;
 };
 
+type Mode = 'navigator' | 'picker';
+
 interface Props {
+  // 全量刷新树（清空缓存）
   refreshNonce?: number;
+
+  // 精准失效：只删除这些 folderId 的缓存（更省 read）
   invalidateNonce?: number;
   invalidateFolderIds?: string[];
 
+  // 当前激活目录（用于高亮）
   currentFolderId: string;
   currentPath: string;
 
-  // navigator：点击后导航
+  // navigator 模式：点击后导航（返回完整面包屑链）
   onNavigate?: (folderId: string, path: string, chain: Crumb[]) => void;
 
-  // 拖拽移动用
+  // 拖拽移动：把 moveItems 移到 targetFolderId
   onMove?: (items: MoveItem[], targetFolderId: string) => void;
   enableDnD?: boolean;
 
-  // picker：点击后选中目标
-  mode?: 'navigator' | 'picker';
+  // picker 模式：点击后选择目标目录（返回完整面包屑链）
+  mode?: Mode;
   pickedFolderId?: string;
   onPick?: (folderId: string, path: string, chain: Crumb[]) => void;
 
+  // 共享缓存（侧边树 + “移动到…”对话框复用，最省 read）
   shared?: SharedTreeState;
 }
 
 interface Node {
   folderId: string;
   name: string;
-  path: string;
+  path: string; // 仅用于 UI 生成 key，不用于后端寻址
 }
 
 export function FolderTree({
@@ -56,7 +64,7 @@ export function FolderTree({
   onPick,
   shared,
 }: Props) {
-  // 允许共享缓存（最省 read）
+  // 本地缓存（如果没传 shared 就用本地）
   const [childrenMapLocal, setChildrenMapLocal] = useState<Map<string, FolderItem[]>>(new Map());
   const [expandedLocal, setExpandedLocal] = useState<Set<string>>(new Set());
   const nodeInfoRefLocal = useRef<Map<string, Node>>(new Map());
@@ -65,7 +73,7 @@ export function FolderTree({
   const setChildrenMap = shared?.setChildrenMap ?? setChildrenMapLocal;
   const expanded = shared?.expanded ?? expandedLocal;
   const setExpanded = shared?.setExpanded ?? setExpandedLocal;
-  const nodeInfoRef = (shared?.nodeInfoRef ?? nodeInfoRefLocal) as any;
+  const nodeInfoRef = (shared?.nodeInfoRef ?? nodeInfoRefLocal) as React.MutableRefObject<Map<string, Node>>;
 
   const [dragOverId, setDragOverId] = useState<string | null>(null);
 
@@ -85,7 +93,7 @@ export function FolderTree({
     }
   };
 
-  // refresh：清缓存（全量刷新）
+  // 全量刷新：清缓存
   useEffect(() => {
     setChildrenMap(new Map());
     setExpanded(new Set());
@@ -93,13 +101,13 @@ export function FolderTree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshNonce]);
 
-  // init root
+  // 初次加载 root
   useEffect(() => {
     loadChildren(root);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 精准失效（不全刷，省 read）
+  // 精准失效：删掉指定 folderId 的缓存；如果该节点已展开，则强制重载一次（读很便宜）
   useEffect(() => {
     if (!invalidateFolderIds.length) return;
 
@@ -131,17 +139,20 @@ export function FolderTree({
     e.preventDefault();
     e.stopPropagation();
     setDragOverId(null);
+
     if (!enableDnD || !onMove) return;
 
     const data = e.dataTransfer.getData('application/json');
     if (!data) return;
 
     try {
-      const { moveItems } = JSON.parse(data);
-      if (!Array.isArray(moveItems) || !moveItems.length) return;
-      await onMove(moveItems as MoveItem[], targetFolderId);
+      const parsed = JSON.parse(data);
+      const moveItems = Array.isArray(parsed?.moveItems) ? (parsed.moveItems as MoveItem[]) : [];
+      if (!moveItems.length) return;
 
-      // 目标变化：失效一次即可（读便宜）
+      await onMove(moveItems, targetFolderId);
+
+      // 目标目录内容变化：失效目标缓存（省事且读便宜）
       setChildrenMap((prev) => {
         const next = new Map(prev);
         next.delete(targetFolderId);
@@ -163,10 +174,10 @@ export function FolderTree({
     const hasChildren = kids.length > 0;
     const isExpanded = expanded.has(node.folderId);
 
-    const onClick = () => {
+    const handleClick = () => {
       if (mode === 'picker') {
         onPick?.(node.folderId, node.path, currentChain);
-        // picker 模式：点击也可自动展开（更人性化，不耗写）
+        // picker 模式点击也顺便展开一下（体验更好，不增加 KV 写）
         if (hasChildren && !isExpanded) toggle(node);
       } else {
         onNavigate?.(node.folderId, node.path, currentChain);
@@ -183,17 +194,34 @@ export function FolderTree({
             ${dragOverId === node.folderId ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
           `}
           style={{ paddingLeft: `${level * 16 + 12}px` }}
-          onClick={onClick}
-          onDragOver={enableDnD ? (e) => { e.preventDefault(); e.stopPropagation(); setDragOverId(node.folderId); } : undefined}
+          onClick={handleClick}
+          onDragOver={
+            enableDnD
+              ? (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setDragOverId(node.folderId);
+                }
+              : undefined
+          }
           onDragLeave={enableDnD ? () => setDragOverId(null) : undefined}
           onDrop={enableDnD ? (e) => handleDrop(e, node.folderId) : undefined}
           title={node.name}
         >
           <div
-            className={`p-0.5 rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-5 h-5 flex-shrink-0 ${!hasChildren ? 'invisible' : ''}`}
-            onClick={(e) => { e.stopPropagation(); toggle(node); }}
+            className={`p-0.5 rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-5 h-5 flex-shrink-0 ${
+              !hasChildren ? 'invisible' : ''
+            }`}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggle(node);
+            }}
           >
-            {isExpanded ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
+            {isExpanded ? (
+              <ChevronDown className="w-3 h-3 text-slate-500" />
+            ) : (
+              <ChevronRight className="w-3 h-3 text-slate-400" />
+            )}
           </div>
 
           {isActive || isExpanded ? (
