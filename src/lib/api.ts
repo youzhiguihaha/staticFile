@@ -9,8 +9,9 @@ export interface FileItem {
 const TOKEN_KEY = 'auth_token';
 const LOGIN_TIME_KEY = 'login_timestamp';
 const SEP = '|';
-const TIMEOUT_MS = 12 * 60 * 60 * 1000; 
+const TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12h
 
+// 安全的 Base64 编码 (处理 Unicode)
 function toBase64(str: string) {
     return btoa(unescape(encodeURIComponent(str)));
 }
@@ -52,19 +53,18 @@ export const api = {
   },
 
   async listFiles(): Promise<FileItem[]> {
-    if (!this.checkAuth()) return [];
-    try {
-        const token = this.getToken();
-        const res = await fetch('/api/list', { headers: { 'Authorization': `Bearer ${token}` } });
-        if (res.ok) {
-            const data = await res.json();
-            return data.files.map((f: FileItem) => ({
-                ...f,
-                key: f.key.replaceAll(SEP, '/') // 转回 UI 路径
-            }));
-        }
-        throw new Error('API Error');
-    } catch (e) { return []; }
+    if (!this.checkAuth()) throw new Error('Expired');
+    const token = this.getToken();
+    const res = await fetch('/api/list', { headers: { 'Authorization': `Bearer ${token}` } });
+    if (res.ok) {
+        const data = await res.json();
+        return data.files.map((f: FileItem) => ({
+            ...f,
+            // 转换回前端路径格式 ( | -> / )
+            key: f.key.replaceAll(SEP, '/')
+        }));
+    }
+    throw new Error('Error');
   },
 
   toStoreKey(uiKey: string) {
@@ -126,6 +126,7 @@ export const api = {
      const parts = storeKey.split('.');
      const ext = parts.length > 1 ? parts.pop() : '';
      const suffix = ext ? `.${ext}` : '';
+     // 生成类似 /file/BASE64.js 的链接
      return `${window.location.origin}/file/${b64}${suffix}`;
   }
 };
