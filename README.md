@@ -1,55 +1,114 @@
-# 自托管文件系统 (Cloudflare Pages + KV)
+<div align="center">
+  <img width="1545" height="655" alt="项目效果展示1" src="https://github.com/user-attachments/assets/cd079cb8-3d8d-4d69-9135-4d6cffcc54af" />
+  <br/>
+  <img width="1290" height="884" alt="项目效果展示2" src="https://github.com/user-attachments/assets/e8ab7985-ead1-41f2-a449-1798211997d7" />
+  <br/>
+  <img width="1116" height="449" alt="项目效果展示3" src="https://github.com/user-attachments/assets/78ae5a16-7e63-4d11-be83-693fc8a1881d" />
+</div>
 
-这是一个基于 Cloudflare Pages 和 KV 存储的简单文件管理系统。支持文件上传、列表查看、删除以及文件直链访问。
+# 自托管文件系统 (Cloudflare Pages + KV)
+> 本人小白，项目全部是用GPT和Gemini编写（存在部分小问题，但不影响日常使用体验）
+
+这是一个基于 Cloudflare Pages 和 KV 存储的简单文件管理系统，支持文件上传、列表查看、删除以及文件直链访问，非常适合搭建个人图床。
+
+---
 
 ## 功能特点
-- 🔒 **安全访问**：必须输入密码才能管理文件。
-- ⚡ **高速直链**：上传文件后生成永久链接，无需登录即可访问（适合做图床）。
-- ☁️ **Serverless**：无需购买服务器，利用 Cloudflare 免费额度即可运行。
-- 📱 **响应式设计**：手机和电脑均可完美使用。
+- 🔒 **安全访问**：必须输入管理员密码才能进入文件管理界面
+- ⚡ **高速直链**：上传文件生成永久公开链接，无需登录即可访问（适配图床场景）
+- ☁️ **Serverless 架构**：无需采购和维护服务器，利用 Cloudflare 免费额度即可运行
+- 📱 **全端响应式**：兼容电脑、手机等不同尺寸设备，使用体验一致
+
+---
 
 ## 部署指南
-
 ### 1. 准备工作
-确保你拥有一个 Cloudflare 账号，并安装了 Node.js 环境（用于本地构建，如果使用 GitHub 自动构建则不需要）。
+1. 拥有一个有效的 Cloudflare 账号（无账号可免费注册）
+2. 可选：安装 Node.js 环境（仅用于本地构建项目，使用 GitHub 自动构建可忽略）
 
 ### 2. 创建 GitHub 仓库
-将本项目代码上传到你的 GitHub 仓库。
+将本项目代码克隆或直接上传至你的个人 GitHub 公共/私有仓库（确保 Cloudflare 能访问该仓库）
 
-### 3. Cloudflare Pages 设置
-1. 登录 Cloudflare Dashboard。
-2. 进入 **Compute (Workers & Pages)** -> **Pages**。
-3. 点击 **Connect to Git**，选择你的仓库。
-4. **构建配置**：
-   - **Framework preset**: None
-   - **项目模板选择**: vue
-   - **Build command**: `npm run build`
-   - **Build output directory**: `dist`
-5. 点击 **Save and Deploy**。
+### 3. Cloudflare Pages 项目配置（简体中文界面）
+1. 登录 Cloudflare 后台
+2. 点击左侧导航栏 **计算和AI** → **Workers 和 Pages**
+3. 点击 **Connect to Git（创建应用程序）**，选择已上传项目的 GitHub 仓库
+    <div align="center">
+      <img src="https://gsyn-img.pages.dev/v2/tAs295d.png" alt="选择Connect to Git" style="width: 80%; margin: 8px 0;" />
+      <img src="https://gsyn-img.pages.dev/v2/FCCRwxK.png" alt="关联GitHub仓库" style="width: 80%; margin: 8px 0;" />
+      <img src="https://gsyn-img.pages.dev/v2/wrv6zs8.png" alt="确认目标仓库" style="width: 80%; margin: 8px 0;" />
+    </div>
+4. 进入 **构建配置** 页面，填写以下参数：
+    - 项目模板选择：`vue`
+    - Build command：`npm run build`
+    - Build output directory：`dist`
+    <div align="center">
+      <img src="https://gsyn-img.pages.dev/v2/qE4ovii.png" alt="构建配置填写" style="width: 80%; margin: 8px 0;" />
+    </div>
+5. 同步配置管理员密码环境变量（提前配置避免后续二次操作）
+    <div align="center">
+      <img src="https://gsyn-img.pages.dev/v2/2HoSDCT.png" alt="配置密码环境变量" style="width: 80%; margin: 8px 0;" />
+    </div>
+    > 📌 提示：变量名需严格对应后续要求，密码可自定义设置（建议复杂度高一些，保障安全）
+6. 点击 **Save and Deploy（保存并部署）**
+7. 等待初始部署完成，继续进行后续 KV 存储绑定操作
+    <div align="center">
+      <img src="https://gsyn-img.pages.dev/v2/uJiDrQV.png" alt="初始部署确认" style="width: 80%; margin: 8px 0;" />
+    </div>
 
-### 4. 绑定 KV 存储 (关键步骤)
-部署完成后，你必须绑定 KV 存储，否则会报错 `Error 1101` 或提示 KV 缺失。
+### 4. 绑定 KV 存储（关键步骤，必做）
+部署完成后必须绑定 KV 存储，否则会出现 `Error 1101` 或 KV 存储缺失报错，步骤如下：
+1. 左侧导航栏进入 **Storage & Databases（存储和数据库）** → **KV（Workers KV）**
+2. 点击 **Create a Namespace**，输入自定义命名空间名称（例如 `MY_FILES`，无强制要求），点击 `Add` 完成创建
+    <div align="center">
+      <img src="https://gsyn-img.pages.dev/v2/AfYrxGs.png" alt="创建KV命名空间" style="width: 80%; margin: 8px 0;" />
+      <img src="https://gsyn-img.pages.dev/v2/Rr5mNAn.png" alt="确认创建KV命名空间" style="width: 80%; margin: 8px 0;" />
+    </div>
+3. 返回你的 Pages 项目详情页面
+4. 点击顶部导航 **Settings** → 左侧 **Functions**
+    <div align="center">
+      <img src="https://gsyn-img.pages.dev/v2/CD2ZcjK.png" alt="进入Functions设置" style="width: 80%; margin: 8px 0;" />
+    </div>
+5. 找到 **KV Namespace Bindings** 模块，点击 **Add binding**
+    <div align="center">
+      <img src="https://gsyn-img.pages.dev/v2/tYGNPTv.png" alt="添加KV绑定" style="width: 80%; margin: 8px 0;" />
+      <img src="https://gsyn-img.pages.dev/v2/PfcKjUv.png" alt="KV绑定配置页面" style="width: 80%; margin: 8px 0;" />
+    </div>
+6. 填写绑定参数（⚠️ 变量名必须完全一致，不可修改）
+    - Variable name：`MY_BUCKET`
+    - KV Namespace：选择刚才创建的 `MY_FILES`（或自定义的命名空间）
+7. 点击 **Save（保存）** 完成绑定
+    <div align="center">
+      <img src="https://gsyn-img.pages.dev/v2/qyXb9Sh.png" alt="保存KV绑定配置" style="width: 80%; margin: 8px 0;" />
+    </div>
 
-1. 在 Cloudflare 侧边栏，进入 **Storage & Databases** -> **KV**。
-2. 点击 **Create a Namespace**，输入名称（例如 `MY_FILES`），点击 Add。
-3. 回到你的 Pages 项目页面。
-4. 点击 **Settings** -> **Functions**。
-5. 找到 **KV Namespace Bindings** 部分，点击 **Add binding**。
-   - **Variable name**: `MY_BUCKET` (⚠️ 必须完全一致，不能改名)
-   - **KV Namespace**: 选择你刚才创建的 `MY_FILES`。
-6. 点击 **Save**。
+### 5. 配置管理员密码（补充方案）
+若在步骤 3 中未配置密码环境变量，可通过此步骤补充配置，操作一致：
+1. 进入 Pages 项目详情页，点击 **Settings** → **Environment variables**
+2. 点击 **Add variable**，填写以下参数：
+    - Key：`PASSWORD`（必须严格一致，不可修改）
+    - Value：自定义你的管理员密码（例如 `MySuperSecretPass123`）
+3. 点击 **Save** 完成配置
+    <div align="center">
+      <img src="https://gsyn-img.pages.dev/v2/qSU7IE4.png" alt="添加密码环境变量" style="width: 80%; margin: 8px 0;" />
+      <img src="https://gsyn-img.pages.dev/v2/wGmgo7Z.png" alt="保存密码环境变量" style="width: 80%; margin: 8px 0;" />
+    </div>
 
-### 5. 设置访问密码
-1. 在 Pages 项目页面，点击 **Settings** -> **Environment variables**。
-2. 点击 **Add variable**。
-   - **Key**: `PASSWORD`
-   - **Value**: 设置你的管理员密码（例如 `MySuperSecretPass`）。
-3. 点击 **Save**。
+### 6. 重新部署（生效关键步骤）
+修改 KV 存储绑定或环境变量后，必须重新部署才能让配置生效：
+1. 进入 Pages 项目详情页的 **Deployments** 标签页
+2. 找到最新的一条部署记录，点击右侧「三个点」→ **Retry deployment**
+    <div align="center">
+      <img src="https://gsyn-img.pages.dev/v2/TKHc5Ns.png" alt="重新部署项目" style="width: 80%; margin: 8px 0;" />
+    </div>
+3. 等待重新部署完成，即可正常访问和使用项目
 
-### 6. 重新部署
-修改绑定和环境变量后，必须**重新部署**才能生效。
-- 进入 **Deployments** 标签页。
-- 在最新的部署记录右侧点击三个点 -> **Retry deployment**。
+---
+
+## 本地开发
+1. 克隆项目到本地后，安装项目依赖：
+    ```bash
+    npm install
 
 ## 本地开发
 1. 安装依赖: `npm install`
