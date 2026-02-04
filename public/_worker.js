@@ -1,6 +1,5 @@
 // _worker.js
 
-// ======= MIME / CORS =======
 const MIME_TYPES = {
   js: 'application/javascript; charset=utf-8',
   json: 'application/json; charset=utf-8',
@@ -28,23 +27,26 @@ const BASE_CORS = {
   'Access-Control-Expose-Headers': 'Content-Type, Content-Length, Content-Disposition, ETag',
 };
 
-// ======= KV Key conventions =======
 const ROOT_ID = 'root';
-const DIR_PREFIX = 'dir:'; // dir:<folderId>
-const BIN_PREFIX = 'bin:'; // bin:<fileId>
+const DIR_PREFIX = 'dir:';
+const BIN_PREFIX = 'bin:';
 
-// ======= Auth config =======
-const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 12h
+const TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 
-// Cloudflare Workers WebCrypto PBKDF2 iterations 上限：100000
 const DEFAULT_PBKDF2_ITER = 100000;
 const MAX_PBKDF2_ITER = 100000;
-const MIN_PBKDF2_ITER = 10000; // 给个下限，避免误填太小
+const MIN_PBKDF2_ITER = 10000;
 
-// ======= Utils =======
-function now() {
-  return Date.now();
-}
+const MAX_FILE_BYTES = 24 * 1024 * 1024;
+
+// isolate 内缓存（省 read）
+let _rootEnsured = false;
+const DIR_CACHE_TTL_MS = 5000;
+const _dirCache = new Map(); // folderId -> { ts, dir }
+
+function now() { return Date.now(); }
+function dirKey(folderId) { return `${DIR_PREFIX}${folderId}`; }
+function binKey(fileId) { return `${BIN_PREFIX}${fileId}`; }
 
 function shortId(len = 12) {
   const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
@@ -54,16 +56,12 @@ function shortId(len = 12) {
   return result;
 }
 
-function dirKey(folderId) {
-  return `${DIR_PREFIX}${folderId}`;
-}
-function binKey(fileId) {
-  return `${BIN_PREFIX}${fileId}`;
-}
-
 function cleanName(name) {
   return (name || '').replace(/[\/\\|]/g, '').trim();
 }
+
+function utf8Encode(str) { return new TextEncoder().encode(str); }
+function utf8Decode(bytes) { return new TextDecoder().decode(bytes); }
 
 function base64urlEncodeBytes(bytes) {
   let s = '';
@@ -72,28 +70,16 @@ function base64urlEncodeBytes(bytes) {
 }
 
 function base64urlDecodeToBytes(b64url) {
-  const b64 =
-    b64url.replace(/-/g, '+').replace(/_/g, '/') +
-    '==='.slice((b64url.length + 3) % 4);
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((b64url.length + 3) % 4);
   const s = atob(b64);
   const out = new Uint8Array(s.length);
   for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
   return out;
 }
 
-function utf8Encode(str) {
-  return new TextEncoder().encode(str);
-}
-function utf8Decode(bytes) {
-  return new TextDecoder().decode(bytes);
-}
-
 function bytesToHex(bytes) {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
-
 function hexToBytes(hex) {
   const h = (hex || '').trim().toLowerCase();
   if (!h || h.length % 2 !== 0) return null;
@@ -101,7 +87,6 @@ function hexToBytes(hex) {
   for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
-
 function constantTimeEqualHex(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   if (a.length !== b.length) return false;
@@ -109,14 +94,18 @@ function constantTimeEqualHex(a, b) {
   for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return r === 0;
 }
+function getIterations(env) {
+  const raw = parseInt((env.PBKDF2_ITERATIONS || '').toString(), 10);
+  const v = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PBKDF2_ITER;
+  return Math.min(Math.max(v, MIN_PBKDF2_ITER), MAX_PBKDF2_ITER);
+}
 
-// ======= Crypto: PBKDF2 + HMAC =======
+// ===== HMAC / PBKDF2 =====
 let _hmacKeyPromise = null;
 
 async function getHmacKey(env) {
   const secret = (env.TOKEN_SECRET || '').trim();
   if (!secret) throw new Error('TOKEN_SECRET missing');
-
   if (!_hmacKeyPromise) {
     _hmacKeyPromise = crypto.subtle.importKey(
       'raw',
@@ -145,30 +134,20 @@ async function pbkdf2Hex(password, saltBytes, iterations, lengthBytes = 32) {
   return bytesToHex(new Uint8Array(bits));
 }
 
-function getIterations(env) {
-  const raw = parseInt((env.PBKDF2_ITERATIONS || '').toString(), 10);
-  const v = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PBKDF2_ITER;
-  // 强制范围：MIN..MAX（并且 MAX=100000，避免你再遇到 500）
-  return Math.min(Math.max(v, MIN_PBKDF2_ITER), MAX_PBKDF2_ITER);
-}
-
 async function verifyPassword(env, passwordInput) {
   passwordInput = (passwordInput || '').trim();
 
   const hashHex = (env.PASSWORD_HASH_HEX || '').trim().toLowerCase();
   const saltHex = (env.PASSWORD_SALT_HEX || '').trim().toLowerCase();
 
-  // PBKDF2 强哈希模式（推荐）
   if (hashHex && saltHex) {
     const salt = hexToBytes(saltHex);
     if (!salt) return false;
-
     const iterations = getIterations(env);
     const derived = await pbkdf2Hex(passwordInput, salt, iterations, 32);
     return constantTimeEqualHex(derived, hashHex);
   }
 
-  // 兼容明文模式（不推荐）
   const plain = (env.PASSWORD_PLAIN || env.PASSWORD || '').toString();
   return passwordInput === plain;
 }
@@ -193,7 +172,6 @@ async function verifyToken(env, token) {
   } catch {
     return null;
   }
-
   if (!payload?.exp || now() > payload.exp) return null;
 
   const expected = await hmacSign(env, utf8Encode(payloadB64));
@@ -207,46 +185,56 @@ async function verifyToken(env, token) {
   return payload;
 }
 
-// ======= Directory model =======
+async function requireAuth(request, env) {
+  const h = request.headers.get('Authorization') || '';
+  const token = h.startsWith('Bearer ') ? h.slice(7) : '';
+  return await verifyToken(env, token);
+}
+
+// ===== Directory shard =====
 function newDir(id, name, parentId) {
   const t = now();
-  return {
-    v: 1,
-    id,
-    name: name || '',
-    parentId: parentId ?? null,
-    createdAt: t,
-    updatedAt: t,
-    folders: {}, // name -> folderId
-    files: {}, // name -> { fileId, type, size, uploadedAt }
-  };
+  return { v: 1, id, name: name || '', parentId: parentId ?? null, createdAt: t, updatedAt: t, folders: {}, files: {} };
+}
+
+async function ensureRoot(env) {
+  if (_rootEnsured) return;
+  const root = await env.MY_BUCKET.get(dirKey(ROOT_ID), { type: 'json' });
+  if (!root) {
+    const r = newDir(ROOT_ID, '', null);
+    await env.MY_BUCKET.put(dirKey(ROOT_ID), JSON.stringify(r));
+    _dirCache.set(ROOT_ID, { ts: now(), dir: r });
+  } else {
+    _dirCache.set(ROOT_ID, { ts: now(), dir: root });
+  }
+  _rootEnsured = true;
 }
 
 async function getDir(env, folderId) {
-  return await env.MY_BUCKET.get(dirKey(folderId), { type: 'json' });
+  const cached = _dirCache.get(folderId);
+  if (cached && now() - cached.ts < DIR_CACHE_TTL_MS) return cached.dir;
+  const dir = await env.MY_BUCKET.get(dirKey(folderId), { type: 'json' });
+  if (dir) _dirCache.set(folderId, { ts: now(), dir });
+  return dir;
 }
 
 async function putDir(env, dirObj) {
   dirObj.updatedAt = now();
   await env.MY_BUCKET.put(dirKey(dirObj.id), JSON.stringify(dirObj));
+  _dirCache.set(dirObj.id, { ts: now(), dir: dirObj });
 }
 
-async function ensureRoot(env) {
-  const root = await getDir(env, ROOT_ID);
-  if (root) return root;
-  const r = newDir(ROOT_ID, '', null);
-  await putDir(env, r);
-  return r;
+async function deleteDir(env, folderId) {
+  await env.MY_BUCKET.delete(dirKey(folderId));
+  _dirCache.delete(folderId);
 }
 
 function ensureUniqueName(mapObj, desiredName) {
   if (!mapObj[desiredName]) return desiredName;
-
   const dot = desiredName.lastIndexOf('.');
   const hasExt = dot > 0 && dot < desiredName.length - 1;
   const base = hasExt ? desiredName.slice(0, dot) : desiredName;
   const ext = hasExt ? desiredName.slice(dot) : '';
-
   let i = 1;
   while (true) {
     const cand = `${base}(${i})${ext}`;
@@ -266,13 +254,7 @@ async function isDescendant(env, maybeChildId, maybeAncestorId, limit = 64) {
   return false;
 }
 
-async function requireAuth(request, env) {
-  const h = request.headers.get('Authorization') || '';
-  const token = h.startsWith('Bearer ') ? h.slice(7) : '';
-  return await verifyToken(env, token);
-}
-
-// ======= Router =======
+// ===== Router =====
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: BASE_CORS });
@@ -293,21 +275,17 @@ export default {
 async function handleApi(request, env) {
   const url = new URL(request.url);
 
-  // ===== login（带错误信息，避免你“看不见原因”）=====
   if (url.pathname === '/api/login') {
     if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
-
     try {
       const body = await request.json().catch(() => ({}));
       const ok = await verifyPassword(env, body?.password || '');
-
       if (!ok) {
         return new Response(JSON.stringify({ success: false, reason: 'bad_password' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json', ...BASE_CORS },
         });
       }
-
       const token = await issueToken(env);
       return new Response(JSON.stringify({ success: true, token, expiresInMs: TOKEN_TTL_MS }), {
         headers: { 'Content-Type': 'application/json', ...BASE_CORS },
@@ -320,25 +298,18 @@ async function handleApi(request, env) {
     }
   }
 
-  // ===== auth required =====
   const auth = await requireAuth(request, env);
   if (!auth) return new Response('Unauthorized', { status: 401, headers: BASE_CORS });
   if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500, headers: BASE_CORS });
 
   await ensureRoot(env);
 
-  // ===== list: GET /api/list?fid=<folderId>&path=<uiPath> =====
   if (url.pathname === '/api/list') {
     const folderId = (url.searchParams.get('fid') || ROOT_ID).trim() || ROOT_ID;
     const path = (url.searchParams.get('path') || '').trim();
 
     const dir = await getDir(env, folderId);
-    if (!dir) {
-      return new Response(JSON.stringify({ success: false, error: 'Folder not found' }), {
-        status: 404,
-        headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-      });
-    }
+    if (!dir) return new Response('Folder not found', { status: 404, headers: BASE_CORS });
 
     const folders = Object.entries(dir.folders || {}).map(([name, id]) => ({
       key: `${path}${name}/`,
@@ -362,25 +333,21 @@ async function handleApi(request, env) {
     folders.sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
     files.sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        folderId: dir.id,
-        parentId: dir.parentId,
-        path,
-        updatedAt: dir.updatedAt || 0,
-        folders,
-        files,
-      }),
-      { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } }
-    );
+    return new Response(JSON.stringify({
+      success: true,
+      folderId: dir.id,
+      parentId: dir.parentId,
+      path,
+      updatedAt: dir.updatedAt || 0,
+      folders,
+      files,
+    }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
   }
 
-  // ===== create folder: POST /api/create-folder { parentId, name } =====
   if (url.pathname === '/api/create-folder') {
     if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
-
     const body = await request.json().catch(() => null);
+
     const parentId = (body?.parentId || ROOT_ID).trim() || ROOT_ID;
     let name = cleanName(body?.name || '');
     if (!name) return new Response('Invalid name', { status: 400, headers: BASE_CORS });
@@ -389,8 +356,6 @@ async function handleApi(request, env) {
     if (!parent) return new Response('Parent not found', { status: 404, headers: BASE_CORS });
 
     parent.folders = parent.folders || {};
-
-    // 已存在则不写入（省 write）
     if (parent.folders[name]) {
       return new Response(JSON.stringify({ success: true, folderId: parent.folders[name], existed: true }), {
         headers: { 'Content-Type': 'application/json', ...BASE_CORS },
@@ -402,7 +367,6 @@ async function handleApi(request, env) {
     const child = newDir(folderId, name, parentId);
 
     await putDir(env, child);
-
     parent.folders[name] = folderId;
     await putDir(env, parent);
 
@@ -411,37 +375,39 @@ async function handleApi(request, env) {
     });
   }
 
-  // ===== upload: multipart POST /api/upload (file x N, folderId) =====
   if (url.pathname === '/api/upload') {
     if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
 
     const formData = await request.formData();
     const folderId = (formData.get('folderId') || ROOT_ID).toString().trim() || ROOT_ID;
     const files = formData.getAll('file').filter((f) => f && typeof f === 'object');
-
     if (!files.length) return new Response('No file', { status: 400, headers: BASE_CORS });
 
     const dir = await getDir(env, folderId);
     if (!dir) return new Response('Folder not found', { status: 404, headers: BASE_CORS });
 
     dir.files = dir.files || {};
-
     if (files.length > 200) return new Response('Too many files in one request', { status: 413, headers: BASE_CORS });
+
+    let changed = false;
 
     for (const f of files) {
       const file = f; // File
+      if (file.size > MAX_FILE_BYTES) return new Response('File too large', { status: 413, headers: BASE_CORS });
+
       let name = cleanName(file.name);
       if (!name) continue;
 
       name = ensureUniqueName(dir.files, name);
-
       const ext = (() => {
         const i = name.lastIndexOf('.');
         return i > 0 ? name.slice(i) : '';
       })();
-
       const fileId = `${shortId(12)}${ext}`;
-      await env.MY_BUCKET.put(binKey(fileId), file.stream());
+
+      await env.MY_BUCKET.put(binKey(fileId), file.stream(), {
+        metadata: { type: file.type || '', size: file.size || 0, name }
+      });
 
       dir.files[name] = {
         fileId,
@@ -449,16 +415,16 @@ async function handleApi(request, env) {
         size: file.size || 0,
         uploadedAt: now(),
       };
+      changed = true;
     }
 
-    await putDir(env, dir);
+    if (changed) await putDir(env, dir);
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { 'Content-Type': 'application/json', ...BASE_CORS },
     });
   }
 
-  // ===== move: POST /api/move { targetFolderId, items:[...] } =====
   if (url.pathname === '/api/move') {
     if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
 
@@ -472,16 +438,19 @@ async function handleApi(request, env) {
     targetDir.folders = targetDir.folders || {};
     targetDir.files = targetDir.files || {};
 
-    const group = new Map(); // fromId -> { files:[], folders:[] }
+    const group = new Map();
     for (const it of items) {
       const fromId = (it?.fromFolderId || '').trim();
       if (!fromId) continue;
+      if (fromId === targetFolderId) continue; // 省资源：同目录 move 直接忽略
       if (!group.has(fromId)) group.set(fromId, { files: [], folders: [] });
       if (it.kind === 'file') group.get(fromId).files.push(it);
       if (it.kind === 'folder') group.get(fromId).folders.push(it);
     }
+    if (group.size === 0) return new Response(JSON.stringify({ success: true, noop: true }), {
+      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
+    });
 
-    // 禁止把文件夹移动进自己/子孙
     for (const g of group.values()) {
       for (const fd of g.folders) {
         const folderId = (fd.folderId || '').trim();
@@ -492,13 +461,17 @@ async function handleApi(request, env) {
     }
 
     const sourceDirs = new Map();
+    const dirty = new Map();
     for (const fromId of group.keys()) {
       const d = await getDir(env, fromId);
       if (!d) return new Response('Source not found', { status: 404, headers: BASE_CORS });
       d.folders = d.folders || {};
       d.files = d.files || {};
       sourceDirs.set(fromId, d);
+      dirty.set(fromId, false);
     }
+
+    let targetDirty = false;
 
     for (const [fromId, g] of group.entries()) {
       const src = sourceDirs.get(fromId);
@@ -512,18 +485,21 @@ async function handleApi(request, env) {
         const newName = ensureUniqueName(targetDir.files, name);
         targetDir.files[newName] = meta;
         delete src.files[name];
+        dirty.set(fromId, true);
+        targetDirty = true;
       }
 
       for (const fd of g.folders) {
         let name = cleanName(fd?.name || '');
         const folderId = (fd?.folderId || '').trim();
         if (!name || !folderId) continue;
-
         if (src.folders[name] !== folderId) continue;
 
         const newName = ensureUniqueName(targetDir.folders, name);
         targetDir.folders[newName] = folderId;
         delete src.folders[name];
+        dirty.set(fromId, true);
+        targetDirty = true;
 
         const moved = await getDir(env, folderId);
         if (moved) {
@@ -534,15 +510,16 @@ async function handleApi(request, env) {
       }
     }
 
-    for (const d of sourceDirs.values()) await putDir(env, d);
-    await putDir(env, targetDir);
+    for (const [id, d] of sourceDirs.entries()) {
+      if (dirty.get(id)) await putDir(env, d);
+    }
+    if (targetDirty) await putDir(env, targetDir);
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { 'Content-Type': 'application/json', ...BASE_CORS },
     });
   }
 
-  // ===== delete: POST /api/batch-delete { items:[...] } =====
   if (url.pathname === '/api/batch-delete') {
     if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
 
@@ -552,7 +529,7 @@ async function handleApi(request, env) {
 
     const MAX_BIN_DELETES = 900;
 
-    const group = new Map(); // fromId -> { files:[], folders:[] }
+    const group = new Map();
     for (const it of items) {
       const fromId = (it?.fromFolderId || '').trim();
       if (!fromId) continue;
@@ -562,16 +539,18 @@ async function handleApi(request, env) {
     }
 
     const sourceDirs = new Map();
+    const dirty = new Map();
     for (const fromId of group.keys()) {
       const d = await getDir(env, fromId);
       if (!d) return new Response('Source not found', { status: 404, headers: BASE_CORS });
       d.folders = d.folders || {};
       d.files = d.files || {};
       sourceDirs.set(fromId, d);
+      dirty.set(fromId, false);
     }
 
     const binToDelete = [];
-    const dirToDelete = [];
+    const dirToDeleteFolderIds = [];
 
     async function collectFolderRecursive(folderId) {
       const d = await getDir(env, folderId);
@@ -588,7 +567,7 @@ async function handleApi(request, env) {
         await collectFolderRecursive(childId);
       }
 
-      dirToDelete.push(dirKey(folderId));
+      dirToDeleteFolderIds.push(folderId);
     }
 
     for (const [fromId, g] of group.entries()) {
@@ -601,6 +580,7 @@ async function handleApi(request, env) {
 
         if (src.files[name]?.fileId === fileId) {
           delete src.files[name];
+          dirty.set(fromId, true);
           binToDelete.push(binKey(fileId));
           if (binToDelete.length > MAX_BIN_DELETES) {
             return new Response('Too many deletes. Please delete in smaller batches.', { status: 413, headers: BASE_CORS });
@@ -615,6 +595,7 @@ async function handleApi(request, env) {
 
         if (src.folders[name] === folderId) {
           delete src.folders[name];
+          dirty.set(fromId, true);
           try {
             await collectFolderRecursive(folderId);
           } catch (e) {
@@ -627,13 +608,15 @@ async function handleApi(request, env) {
       }
     }
 
-    for (const d of sourceDirs.values()) await putDir(env, d);
+    for (const [id, d] of sourceDirs.entries()) {
+      if (dirty.get(id)) await putDir(env, d);
+    }
 
     const uniqBin = Array.from(new Set(binToDelete));
     for (const k of uniqBin) await env.MY_BUCKET.delete(k);
 
-    const uniqDir = Array.from(new Set(dirToDelete));
-    for (const k of uniqDir) await env.MY_BUCKET.delete(k);
+    const uniqDirFolderIds = Array.from(new Set(dirToDeleteFolderIds));
+    for (const folderId of uniqDirFolderIds) await deleteDir(env, folderId);
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { 'Content-Type': 'application/json', ...BASE_CORS },
@@ -655,15 +638,15 @@ async function handleFile(request, env) {
     if (!fileId || fileId.length < 5) return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
 
     const ext = (fileId.split('.').pop() || '').toLowerCase();
-    const data = await env.MY_BUCKET.get(binKey(fileId), { type: 'arrayBuffer' });
-    if (!data) return new Response('File Not Found', { status: 404, headers: BASE_CORS });
+    const { value, metadata } = await env.MY_BUCKET.getWithMetadata(binKey(fileId), { type: 'arrayBuffer' });
+    if (!value) return new Response('File Not Found', { status: 404, headers: BASE_CORS });
 
     const headers = new Headers(BASE_CORS);
-    headers.set('Content-Type', MIME_TYPES[ext] || 'application/octet-stream');
+    headers.set('Content-Type', MIME_TYPES[ext] || metadata?.type || 'application/octet-stream');
     headers.set('Cache-Control', 'public, max-age=86400');
 
     if (request.method === 'HEAD') return new Response(null, { headers });
-    return new Response(data, { headers });
+    return new Response(value, { headers });
   } catch (e) {
     return new Response(`File Error: ${e?.message || 'Unknown'}`, { status: 500, headers: BASE_CORS });
   }
