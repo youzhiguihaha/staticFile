@@ -79,7 +79,7 @@ async function handleApi(request, env) {
     if (token !== passwordHash) return new Response('Unauthorized', { status: 401, headers: BASE_CORS });
     if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500, headers: BASE_CORS });
 
-    // 上传 (核心修复：ID包含后缀)
+    // 上传
     if (url.pathname === '/api/upload') {
       const formData = await request.formData();
       const file = formData.get('file');
@@ -227,7 +227,7 @@ async function handleApi(request, env) {
     return new Response('Not Found', { status: 404, headers: BASE_CORS });
 }
 
-// --- 文件直链 ---
+// --- 文件直链 (修复了 ERR_CONNECTION_RESET) ---
 async function handleFile(request, env) {
   try {
     const url = new URL(request.url);
@@ -248,16 +248,19 @@ async function handleFile(request, env) {
     if (MIME_TYPES[ext]) headers.set('Content-Type', MIME_TYPES[ext]);
     else headers.set('Content-Type', metadata?.type || 'application/octet-stream');
 
-    // 关键：手动补全 Content-Length
+    // 设置 Content-Length
     if (metadata && metadata.size) {
         headers.set('Content-Length', metadata.size.toString());
     }
 
-    // 关键：Connection: close 解决 ECONNRESET
-    headers.set('Connection', 'close');
     headers.set('Cache-Control', 'public, max-age=86400');
     
-    return new Response(value, { headers });
+    // 关键修复：encodeBody: 'manual' 禁止 Cloudflare 自动压缩
+    // 这样 metadata.size (原始大小) 才能和 Content-Length 匹配
+    return new Response(value, { 
+        headers,
+        encodeBody: 'manual' 
+    });
 
   } catch (e) {
     return new Response(`File Error: ${e.message}`, { status: 500, headers: BASE_CORS });
