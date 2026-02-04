@@ -105,19 +105,16 @@ export const api = {
 
   getFileUrl(item: FileItem | string) {
      let fileId = '';
-     let fileName = '';
      
      if (typeof item === 'string') {
          return '';
      } else {
          fileId = item.fileId || '';
-         fileName = item.name;
      }
 
      if (!fileId) return '';
 
-     const ext = fileName.split('.').pop();
-     const suffix = ext ? `.${ext}` : '';
-     return `${window.location.origin}/file/${fileId}${suffix}`;
+     // 直接拼接 ID (已经带后缀了)
+     return `${window.location.origin}/file/${fileId}`;
   }
 };
