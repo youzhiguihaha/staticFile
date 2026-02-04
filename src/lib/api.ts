@@ -85,7 +85,10 @@ export const api = {
     if (!res.ok) throw new Error('Move failed');
   },
 
+  // --- 关键修复：URL 编码 ---
   getFileUrl(key: string) {
-     return `${window.location.origin}/file/${key}`;
+     // 使用 encodeURIComponent 将 / 转义为 %2F，确保后端能将其识别为完整 key
+     // 某些客户端可能需要完整的绝对路径
+     return `${window.location.origin}/file/${encodeURIComponent(key)}`;
   }
 };
