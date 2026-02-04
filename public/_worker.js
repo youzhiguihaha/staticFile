@@ -226,18 +226,16 @@ async function handleApi(request, env) {
     return new Response('Not Found', { status: 404, headers: BASE_CORS });
 }
 
-// --- 文件直链 (最终修复版：移除 Content-Length) ---
+// --- 文件直链 (针对 Node.js/Electron/洛雪音乐 完美修复版) ---
 async function handleFile(request, env) {
   try {
     const url = new URL(request.url);
-    // URL格式: /file/u3g0k3b8.js
     let fileId = decodeURIComponent(url.pathname.replace('/file/', ''));
     
     if (fileId.length < 5) return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
 
     const ext = fileId.split('.').pop().toLowerCase();
     
-    // 使用 stream 模式
     const { value, metadata } = await env.MY_BUCKET.getWithMetadata(fileId, { type: 'stream' });
     
     if (!value) return new Response('File Not Found', { status: 404, headers: BASE_CORS });
@@ -247,14 +245,24 @@ async function handleFile(request, env) {
     if (MIME_TYPES[ext]) headers.set('Content-Type', MIME_TYPES[ext]);
     else headers.set('Content-Type', metadata?.type || 'application/octet-stream');
 
-    // !!! 关键修复 !!!
-    // 移除 Content-Length。
-    // 这允许浏览器使用 Chunked 编码接收文件，兼容 Cloudflare 的自动 Gzip 压缩，
-    // 彻底解决 ERR_CONNECTION_RESET。
-    
+    // 1. 恢复 Content-Length：满足软件对进度的检测需求
+    if (metadata && metadata.size) {
+        headers.set('Content-Length', metadata.size.toString());
+    }
+
+    // 2. 关键：Connection: close
+    // 许多 Node.js 客户端在长连接下处理数据流时会报 ECONNRESET
+    headers.set('Connection', 'close');
+
     headers.set('Cache-Control', 'public, max-age=86400');
     
-    return new Response(value, { headers });
+    // 3. 核心：encodeBody: 'manual'
+    // 强制禁止 Cloudflare 压缩。
+    // 确保传输的数据字节数 = Content-Length，否则一定报错。
+    return new Response(value, { 
+        headers,
+        encodeBody: 'manual' 
+    });
 
   } catch (e) {
     return new Response(`File Error: ${e.message}`, { status: 500, headers: BASE_CORS });
