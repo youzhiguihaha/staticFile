@@ -8,10 +8,9 @@ export interface FileItem {
 
 const TOKEN_KEY = 'auth_token';
 const LOGIN_TIME_KEY = 'login_timestamp';
-const SEP = '|';
-const TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12h
+// 移除 SEP 转换，回归标准路径
+const TIMEOUT_MS = 12 * 60 * 60 * 1000; 
 
-// 安全的 Base64 编码 (处理 Unicode)
 function toBase64(str: string) {
     return btoa(unescape(encodeURIComponent(str)));
 }
@@ -44,7 +43,7 @@ export const api = {
         });
         if (res.ok) {
             const data = await res.json();
-            localStorage.setItem(TOKEN_KEY, data.token);
+            localStorage.setItem(TOKEN_KEY, data.token); // Hash
             localStorage.setItem(LOGIN_TIME_KEY, Date.now().toString());
             return true;
         }
@@ -54,21 +53,12 @@ export const api = {
 
   async listFiles(): Promise<FileItem[]> {
     if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
-    const res = await fetch('/api/list', { headers: { 'Authorization': `Bearer ${token}` } });
-    if (res.ok) {
-        const data = await res.json();
-        return data.files.map((f: FileItem) => ({
-            ...f,
-            // 转换回前端路径格式 ( | -> / )
-            key: f.key.replaceAll(SEP, '/')
-        }));
-    }
-    throw new Error('Error');
-  },
-
-  toStoreKey(uiKey: string) {
-      return uiKey.replaceAll('/', SEP);
+    try {
+        const token = this.getToken();
+        const res = await fetch('/api/list', { headers: { 'Authorization': `Bearer ${token}` } });
+        if (res.ok) return (await res.json()).files; // 直接返回，无需转换
+        throw new Error('API Error');
+    } catch (e) { return []; }
   },
 
   async createFolder(path: string): Promise<void> {
@@ -84,10 +74,8 @@ export const api = {
   async upload(file: File, folderPath: string): Promise<void> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
-    const safeName = file.name.replace(/[|]/g, '_');
-    const safeFile = new File([file], safeName, { type: file.type });
     const formData = new FormData();
-    formData.append('file', safeFile);
+    formData.append('file', file);
     formData.append('folder', folderPath); 
     await fetch('/api/upload', {
         method: 'POST',
@@ -96,37 +84,32 @@ export const api = {
     });
   },
   
-  async batchDelete(uiKeys: string[]): Promise<void> {
+  async batchDelete(keys: string[]): Promise<void> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
-    const storeKeys = uiKeys.map(k => this.toStoreKey(k));
     await fetch('/api/batch-delete', {
          method: 'POST',
          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-         body: JSON.stringify({ keys: storeKeys })
+         body: JSON.stringify({ keys })
     });
   },
 
-  async moveFile(sourceUiKey: string, targetPath: string): Promise<void> {
+  async moveFile(sourceKey: string, targetPath: string): Promise<void> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     await fetch('/api/move', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            sourceKey: this.toStoreKey(sourceUiKey), 
-            targetPath 
-        })
+        body: JSON.stringify({ sourceKey, targetPath })
     });
   },
 
-  getFileUrl(uiKey: string) {
-     const storeKey = this.toStoreKey(uiKey);
-     const b64 = toBase64(storeKey);
-     const parts = storeKey.split('.');
+  getFileUrl(key: string) {
+     // 使用 Base64 编码路径，防止洛雪音乐解析 URL 失败
+     const b64 = toBase64(key);
+     const parts = key.split('.');
      const ext = parts.length > 1 ? parts.pop() : '';
      const suffix = ext ? `.${ext}` : '';
-     // 生成类似 /file/BASE64.js 的链接
      return `${window.location.origin}/file/${b64}${suffix}`;
   }
 };
