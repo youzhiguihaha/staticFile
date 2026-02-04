@@ -1,4 +1,4 @@
-// Login.tsx
+// src/components/Login.tsx
 import React, { useState } from 'react';
 import { Lock, Loader2 } from 'lucide-react';
 import toast from 'react-hot-toast';
@@ -23,11 +23,11 @@ export function Login({ onLogin }: LoginProps) {
       const success = await onLogin(pwd);
       if (success) {
         toast.success('登录成功');
-        setPassword(''); // 成功后清空，减少明文停留
+        setPassword('');
       } else {
         toast.error('密码错误');
       }
-    } catch (error) {
+    } catch {
       toast.error('登录失败');
     } finally {
       setLoading(false);
