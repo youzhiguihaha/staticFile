@@ -83,11 +83,7 @@ function TreeNodeItem({ node, currentPath, onNavigate, onDrop, level }: { node: 
 
   return (
     <div className="relative">
-      {/* 垂直参考线 (视觉辅助) */}
-      {level > 0 && (
-          <div className="absolute top-0 bottom-0 border-l border-slate-200/50" style={{ left: `${level * 16 + 4}px` }} />
-      )}
-
+      {level > 0 && <div className="absolute top-0 bottom-0 border-l border-slate-200/50" style={{ left: `${level * 16 + 4}px` }} />}
       <div 
         className={`flex items-center gap-1.5 py-1 px-2 mx-1 rounded-md cursor-pointer transition-colors whitespace-nowrap relative z-10
             ${isActive ? 'bg-blue-100 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-200/50'}
