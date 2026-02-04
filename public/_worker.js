@@ -9,8 +9,11 @@ function uuidv4() {
 const MIME_TYPES = {
   'js': 'application/javascript; charset=utf-8',
   'json': 'application/json; charset=utf-8',
-  'txt': 'text/plain; charset=utf-8',
   'css': 'text/css; charset=utf-8',
+  'html': 'text/html; charset=utf-8',
+  'txt': 'text/plain; charset=utf-8',
+  'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+  'mp3': 'audio/mpeg', 'lrc': 'text/plain; charset=utf-8'
 };
 
 export default {
@@ -33,7 +36,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': '*',
 };
 
-// 简单的 SHA-256
 async function sha256(str) {
     const buf = new TextEncoder().encode(str);
     const hash = await crypto.subtle.digest('SHA-256', buf);
@@ -46,23 +48,20 @@ async function handleApi(request, env) {
     const password = env.PASSWORD || "admin"; 
     const passwordHash = await sha256(password);
 
-    // 登录
     if (url.pathname === '/api/login') {
       if (request.method !== 'POST') return new Response(null, { status: 405 });
       const body = await request.json();
       if (body.password === password) {
-          return new Response(JSON.stringify({ success: true, token: passwordHash }), { 
-              headers: { 'Content-Type': 'application/json', ...corsHeaders } 
-          });
+          return new Response(JSON.stringify({ success: true, token: passwordHash }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
       }
       return new Response(JSON.stringify({ success: false }), { status: 401, headers: corsHeaders });
     }
 
     const token = authHeader ? authHeader.replace('Bearer ', '') : '';
     if (token !== passwordHash) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
-    if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500 });
+    if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV Error' }), { status: 500 });
 
-    // --- 双 KV 上传 ---
+    // --- 上传 (核心双 KV 逻辑) ---
     if (url.pathname === '/api/upload') {
       const formData = await request.formData();
       const file = formData.get('file');
@@ -72,77 +71,71 @@ async function handleApi(request, env) {
       const safeName = file.name.replace(/[\/|]/g, '_'); 
       const pathPrefix = folder ? (folder.endsWith('/') ? folder : `${folder}/`) : '';
       
-      // 1. 生成内容 ID (file:UUID)
+      // 1. 物理内容 Key: file:<UUID>
       const fileId = `file:${uuidv4()}`;
       
-      // 2. 生成路径 Key (path:folder/filename)
-      const pathKey = `path:${pathPrefix}${safeName}`; // 注意不加时间戳了，直接用路径，或者你需要防重名可加
-      // 如果为了防重名，还是加上时间戳比较稳
-      const uniquePathKey = `path:${pathPrefix}${Date.now()}-${safeName}`;
+      // 2. 逻辑路径 Key: path:folder/filename
+      // 为了排序，不加时间戳了，直接用路径 (覆盖旧文件)
+      const pathKey = `path:${pathPrefix}${safeName}`;
 
-      // 3. 存文件内容 (大文件用 stream，小文件无所谓)
+      // 存内容
       await env.MY_BUCKET.put(fileId, file.stream(), {
-          // 这里存 metadata 主要是为了直链下载时方便读取类型
           metadata: { type: file.type, size: file.size, name: safeName }
       });
 
-      // 4. 存路径映射 (只存 JSON 引用)
+      // 存路径映射
       const meta = {
-          fileId: fileId,
+          fileId: fileId, // 关联物理文件
           name: safeName,
           type: file.type,
           size: file.size,
           uploadedAt: Date.now()
       };
-      await env.MY_BUCKET.put(uniquePathKey, JSON.stringify(meta), { metadata: meta });
+      // 注意：这里把 meta 同时也写进 value，方便读取
+      await env.MY_BUCKET.put(pathKey, JSON.stringify(meta), { metadata: meta });
 
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // 新建文件夹 (只存一个占位符路径 key)
+    // --- 新建文件夹 (单 KV) ---
     if (url.pathname === '/api/create-folder') {
-      const { path } = await request.json(); // "A/B/"
-      const folderKey = `path:${path}`; // 确保以 / 结尾
+      const { path } = await request.json(); // path: "A/B/"
+      // 直接存 path:A/B/，Value 空
+      const folderKey = `path:${path}`;
       const folderName = path.split('/').filter(Boolean).pop();
-      // 存一个空对象作为标记
-      await env.MY_BUCKET.put(folderKey, JSON.stringify({ isFolder: true }), {
+      await env.MY_BUCKET.put(folderKey, 'folder', {
         metadata: { name: folderName, type: 'folder', uploadedAt: Date.now() }
       });
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // 列表 (只扫描 path: 开头的 key)
+    // --- 列表 ---
     if (url.pathname === '/api/list') {
       let files = [];
-      let listParams = { prefix: 'path:', limit: 1000 };
+      let listParams = { prefix: 'path:', limit: 1000 }; // 只扫描逻辑路径
       let listing;
       do {
           listing = await env.MY_BUCKET.list(listParams);
           for (const k of listing.keys) {
-              // 去掉 'path:' 前缀返回给前端
-              const realPath = k.name.slice(5); 
+              const realPath = k.name.slice(5); // 去掉 path:
               files.push({ 
-                  key: realPath, // 前端看到的 key (路径)
-                  ...k.metadata, // 包含 fileId
-                  // 如果 metadata 里没有 fileId (比如文件夹)，需要处理
-                  fileId: k.metadata?.isFolder ? null : (k.metadata?.fileId || null)
+                  key: realPath,
+                  ...k.metadata,
+                  // 如果是文件，元数据里应该有 fileId
+                  fileId: k.metadata?.fileId
               });
           }
           listParams.cursor = listing.cursor;
       } while (listing.list_complete === false);
       
-      // 如果 metadata 丢失 (旧数据)，尝试从 value 补充 (性能较差，暂不实现，假设 metadata 健在)
-      
       files.sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
       return new Response(JSON.stringify({ success: true, files }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
     
-    // 移动 (只操作 path key，不动 file key)
+    // --- 移动 (只改 path，不动 file) ---
     if (url.pathname === '/api/move') {
-        const { sourceKey, targetPath } = await request.json(); // sourceKey: "A/b.jpg" (无path:前缀)
+        const { sourceKey, targetPath } = await request.json(); // sourceKey: "A/b.jpg"
         const safeTargetPrefix = targetPath ? (targetPath.endsWith('/') ? targetPath : `${targetPath}/`) : '';
-        
-        // 补全前缀
         const fullSourceKey = `path:${sourceKey}`;
         
         if (fullSourceKey.endsWith('/') && `path:${safeTargetPrefix}`.startsWith(fullSourceKey)) return new Response('Error', { status: 400 });
@@ -154,15 +147,16 @@ async function handleApi(request, env) {
             do {
                 listing = await env.MY_BUCKET.list(listParams);
                 for (const item of listing.keys) {
-                    const oldKey = item.name; // "path:A/b.jpg"
+                    const oldKey = item.name; 
                     const suffix = oldKey.slice(fullSourceKey.length); 
                     const folderName = sourceKey.split('/').filter(Boolean).pop();
                     const newKey = `path:${safeTargetPrefix}${folderName}/${suffix}`;
                     
                     if (oldKey === newKey) continue;
-                    // 读取 Value (包含 fileId 的 JSON)
+                    
+                    // 读取原 path 的 Value (元数据)
                     const val = await env.MY_BUCKET.get(oldKey);
-                    if (val) {
+                    if (val) { // val 可能是 'folder' 或 JSON
                         await env.MY_BUCKET.put(newKey, val, { metadata: item.metadata });
                         await env.MY_BUCKET.delete(oldKey);
                     }
@@ -181,33 +175,32 @@ async function handleApi(request, env) {
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // 批量删除 (删 path 同时删 file)
+    // --- 批量删除 (联动删除) ---
     if (url.pathname === '/api/batch-delete') {
        const { keys } = await request.json(); // keys: ["A/b.jpg"]
        for (const uiKey of keys) {
          const targetKey = `path:${uiKey}`;
          
-         // 1. 如果是文件，先读出 fileId 并删除内容
+         // 1. 如果是文件，先读 fileId 并删除物理文件
          if (!targetKey.endsWith('/')) {
              const metaStr = await env.MY_BUCKET.get(targetKey);
              try {
                  const meta = JSON.parse(metaStr);
                  if (meta && meta.fileId) {
-                     await env.MY_BUCKET.delete(meta.fileId); // 删除物理文件
+                     await env.MY_BUCKET.delete(meta.fileId); 
                  }
-             } catch(e) {} // 忽略错误
-             await env.MY_BUCKET.delete(targetKey); // 删除路径记录
+             } catch(e) {} 
+             await env.MY_BUCKET.delete(targetKey); 
          }
          
          // 2. 如果是文件夹，递归删除
          if (targetKey.endsWith('/')) {
-             await env.MY_BUCKET.delete(targetKey); // 删除文件夹本身记录
+             await env.MY_BUCKET.delete(targetKey);
              let listParams = { prefix: targetKey };
              let listing;
              do {
                 listing = await env.MY_BUCKET.list(listParams);
                 for (const subKey of listing.keys) {
-                    // 读取子文件 fileId
                     const subMetaStr = await env.MY_BUCKET.get(subKey.name);
                     try {
                         const subMeta = JSON.parse(subMetaStr);
@@ -228,46 +221,43 @@ async function handleApi(request, env) {
 async function handleFile(request, env) {
   try {
     const url = new URL(request.url);
-    // URL 格式: /file/file:UUID.js
-    // 我们只需要 file:UUID 部分
+    // 格式: /file/file:UUID.js
     let pathPart = url.pathname.replace('/file/', '');
-    
-    // 去掉可能的伪后缀 (.js, .mp3)
-    // 简单粗暴：file: 开头，直到遇到第一个非 ID 字符或者 . 
-    // 其实 fileId 是固定的，我们直接找 file: 到 . 之前的部分
     let fileId = decodeURIComponent(pathPart);
+    
+    // 去掉可能的后缀
     const lastDot = fileId.lastIndexOf('.');
     if (lastDot > 0) fileId = fileId.substring(0, lastDot);
 
-    // 安全检查：必须是 file: 开头
-    if (!fileId.startsWith('file:')) return new Response('Invalid File ID', { status: 400, headers: corsHeaders });
+    // 安全检查
+    if (!fileId.startsWith('file:')) return new Response('Invalid File ID', { status: 400 });
 
-    // 1. 直接读取内容 (使用你验证过的稳定逻辑)
-    // 判定文件类型
     const ext = pathPart.split('.').pop().toLowerCase();
-    const isCode = ['js', 'json', 'txt', 'css', 'html', 'lrc'].includes(ext);
-    const fetchType = isCode ? 'arrayBuffer' : 'stream';
+    const isScript = ['js', 'json', 'txt', 'css'].includes(ext);
+    
+    // 使用 arrayBuffer 读取 (Buffer-First 策略)
+    // 这是你之前验证过可行的方案
+    const fetchType = isScript ? 'arrayBuffer' : 'stream';
 
     const { value, metadata } = await env.MY_BUCKET.getWithMetadata(fileId, { type: fetchType });
-    
     if (!value) return new Response('File Not Found', { status: 404, headers: corsHeaders });
 
     const headers = new Headers(corsHeaders);
     headers.set('Access-Control-Allow-Origin', '*'); 
     
-    // Content-Type
     if (MIME_TYPES[ext]) headers.set('Content-Type', MIME_TYPES[ext]);
     else headers.set('Content-Type', metadata?.type || 'application/octet-stream');
 
-    // Length
     if (fetchType === 'arrayBuffer') {
       headers.set('Content-Length', value.byteLength.toString());
-    } else if (metadata?.size) {
-      headers.set('Content-Length', metadata.size.toString());
+      // 脚本强制短连接 + 禁止缓存变换
+      headers.set('Connection', 'close');
+      headers.set('Cache-Control', 'no-transform');
+    } else {
+        if (metadata?.size) headers.set('Content-Length', metadata.size.toString());
+        headers.set('Connection', 'keep-alive');
+        headers.set('Cache-Control', 'public, max-age=86400');
     }
-    
-    headers.set('Cache-Control', 'public, max-age=86400');
-    headers.set('Connection', 'keep-alive');
 
     return new Response(value, { headers });
 
