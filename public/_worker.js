@@ -16,20 +16,28 @@ const MIME_TYPES = {
   'css': 'text/css; charset=utf-8',
   'html': 'text/html; charset=utf-8',
   'xml': 'application/xml; charset=utf-8',
-  'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-  'mp3': 'audio/mpeg', 'lrc': 'text/plain; charset=utf-8'
+  'csv': 'text/csv; charset=utf-8',
+  'png': 'image/png', 
+  'jpg': 'image/jpeg', 
+  'jpeg': 'image/jpeg',
+  'gif': 'image/gif', 
+  'webp': 'image/webp', 
+  'svg': 'image/svg+xml',
+  'mp3': 'audio/mpeg', 
+  'lrc': 'text/plain; charset=utf-8',
+  'mp4': 'video/mp4'
 };
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': '*',
   'Access-Control-Allow-Headers': '*',
+  'Access-Control-Expose-Headers': 'Content-Length, Content-Range',
   'Access-Control-Max-Age': '86400',
 };
 
 export default {
   async fetch(request, env) {
-    // 强制全局 CORS，优先处理
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
     
     try {
@@ -55,6 +63,7 @@ async function handleApi(request, env) {
     const password = env.PASSWORD || "admin"; 
     const passwordHash = await sha256(password);
 
+    // 登录
     if (url.pathname === '/api/login') {
       if (request.method !== 'POST') return new Response(null, { status: 405 });
       const body = await request.json();
@@ -78,8 +87,9 @@ async function handleApi(request, env) {
       const safeName = file.name.replace(/[\/|]/g, '_'); 
       const pathPrefix = folder ? (folder.endsWith('/') ? folder : `${folder}/`) : '';
       
-      // 使用短 ID
+      // 1. 生成短 ID (例如 a1b2c3d4e5f6)
       const fileId = shortId(); 
+      // 2. 生成逻辑路径 Key
       const pathKey = `path:${pathPrefix}${safeName}`;
 
       await env.MY_BUCKET.put(fileId, file.stream(), {
@@ -98,18 +108,19 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // ... (create-folder, list, move, batch-delete 逻辑保持之前的版本完全不变，直接复用即可) ...
-    // 为了防止你复制出错，我这里还是把它们列出来
-    
+    // --- 新建文件夹 ---
     if (url.pathname === '/api/create-folder') {
       const { path } = await request.json(); 
       const safePath = path.endsWith('/') ? path : `${path}/`;
       const folderKey = `path:${safePath}`;
       const folderName = safePath.split('/').filter(Boolean).pop();
-      await env.MY_BUCKET.put(folderKey, 'folder', { metadata: { name: folderName, type: 'folder', uploadedAt: Date.now() } });
+      await env.MY_BUCKET.put(folderKey, 'folder', {
+        metadata: { name: folderName, type: 'folder', uploadedAt: Date.now() }
+      });
       return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
+    // --- 列表 ---
     if (url.pathname === '/api/list') {
       let files = [];
       let listParams = { prefix: 'path:', limit: 1000 };
@@ -117,7 +128,7 @@ async function handleApi(request, env) {
       do {
           listing = await env.MY_BUCKET.list(listParams);
           for (const k of listing.keys) {
-              const realPath = k.name.slice(5); 
+              const realPath = k.name.slice(5); // 去掉 path:
               const isFolder = k.metadata?.type === 'folder' || realPath.endsWith('/');
               files.push({ 
                   key: realPath,
@@ -132,11 +143,14 @@ async function handleApi(request, env) {
       return new Response(JSON.stringify({ success: true, files }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
     
+    // --- 移动 ---
     if (url.pathname === '/api/move') {
         const { sourceKey, targetPath } = await request.json(); 
         const safeTargetPrefix = targetPath ? (targetPath.endsWith('/') ? targetPath : `${targetPath}/`) : '';
         const fullSourceKey = `path:${sourceKey}`;
+        
         if (fullSourceKey.endsWith('/') && `path:${safeTargetPrefix}`.startsWith(fullSourceKey)) return new Response('Error', { status: 400 });
+
         const isFolder = fullSourceKey.endsWith('/');
         if (isFolder) {
             let listParams = { prefix: fullSourceKey };
@@ -149,8 +163,12 @@ async function handleApi(request, env) {
                     const folderName = sourceKey.split('/').filter(Boolean).pop();
                     const newKey = `path:${safeTargetPrefix}${folderName}/${suffix}`;
                     if (oldKey === newKey) continue;
+                    
                     const val = await env.MY_BUCKET.get(oldKey);
-                    if (val) { await env.MY_BUCKET.put(newKey, val, { metadata: item.metadata }); await env.MY_BUCKET.delete(oldKey); }
+                    if (val) {
+                        await env.MY_BUCKET.put(newKey, val, { metadata: item.metadata });
+                        await env.MY_BUCKET.delete(oldKey);
+                    }
                 }
                 listParams.cursor = listing.cursor;
             } while (listing.list_complete === false);
@@ -158,15 +176,21 @@ async function handleApi(request, env) {
             const fileName = sourceKey.split('/').pop();
             const newKey = `path:${safeTargetPrefix}${fileName}`;
             const { value, metadata } = await env.MY_BUCKET.getWithMetadata(fullSourceKey);
-            if (value) { await env.MY_BUCKET.put(newKey, value, { metadata }); await env.MY_BUCKET.delete(fullSourceKey); }
+            if (value) {
+                await env.MY_BUCKET.put(newKey, value, { metadata });
+                await env.MY_BUCKET.delete(fullSourceKey);
+            }
         }
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
+    // --- 批量删除 ---
     if (url.pathname === '/api/batch-delete') {
        const { keys } = await request.json(); 
        for (const uiKey of keys) {
          const targetKey = `path:${uiKey}`;
+         
+         // 1. 删除文件
          if (!targetKey.endsWith('/')) {
              const metaStr = await env.MY_BUCKET.get(targetKey);
              try {
@@ -175,6 +199,8 @@ async function handleApi(request, env) {
              } catch(e) {} 
              await env.MY_BUCKET.delete(targetKey); 
          }
+         
+         // 2. 删除文件夹
          if (targetKey.endsWith('/')) {
              await env.MY_BUCKET.delete(targetKey);
              let listParams = { prefix: targetKey };
@@ -200,7 +226,7 @@ async function handleApi(request, env) {
     return new Response('Not Found', { status: 404, headers: corsHeaders });
 }
 
-// --- 适配短 ID 的下载逻辑 ---
+// --- 文件直链 (核心修复逻辑) ---
 async function handleFile(request, env) {
   try {
     const url = new URL(request.url);
@@ -212,14 +238,12 @@ async function handleFile(request, env) {
     const lastDot = fileId.lastIndexOf('.');
     if (lastDot > 0) fileId = fileId.substring(0, lastDot);
 
-    // 格式检查 (12位 ID)
     if (fileId.length !== 12) return new Response('Invalid ID', { status: 400 });
 
     const ext = pathPart.split('.').pop().toLowerCase();
     const isScript = ['js', 'json', 'txt', 'css'].includes(ext);
 
-    // 1. 读取模式：脚本用 Text，其他用 Stream
-    // 注意：用 Text 读取是为了计算精确字节数，这是 Node.js 客户端不报错的关键
+    // 1. 脚本文件：文本模式读取 -> 字节计算 -> 纯净响应
     if (isScript) {
         const textVal = await env.MY_BUCKET.get(fileId, { type: 'text' });
         if (textVal === null) return new Response('File Not Found', { status: 404, headers: corsHeaders });
@@ -230,14 +254,14 @@ async function handleFile(request, env) {
         const headers = new Headers(corsHeaders);
         headers.set('Content-Type', MIME_TYPES[ext] || 'text/plain; charset=utf-8');
         headers.set('Content-Length', bytes.length.toString());
-        
-        // 关键：不设 Connection: close，也不设 Keep-Alive，让 Cloudflare 自动处理
-        // 关键：禁用压缩
+        // 禁止压缩和变换
         headers.set('Content-Encoding', 'identity');
         headers.set('Cache-Control', 'no-transform, public, max-age=86400');
         
         return new Response(bytes, { headers });
-    } else {
+    } 
+    // 2. 其他文件：流模式
+    else {
         const { value, metadata } = await env.MY_BUCKET.getWithMetadata(fileId, { type: 'stream' });
         if (!value) return new Response('File Not Found', { status: 404, headers: corsHeaders });
 
