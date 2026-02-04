@@ -23,9 +23,10 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({ x: 0, y: 0, item: null, visible: false });
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
-  
-  // 删除确认 Modal 状态
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean, targets: string[] }>({ isOpen: false, targets: [] });
+
+  // 辅助函数：根据 Key 获取 Item 对象
+  const getItemByKey = (key: string) => files.find(f => f.key === key);
 
   const viewItems = useMemo(() => {
     if (searchQuery) {
@@ -48,7 +49,9 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                 processedFolders.add(folderName);
                 items.push({
                     key: currentPath + folderName + '/', name: folderName, displayName: folderName,
-                    type: 'folder', size: 0, uploadedAt: file.uploadedAt, isFolder: true
+                    type: 'folder', size: 0, uploadedAt: file.uploadedAt, isFolder: true,
+                    // 文件夹没有 fileId
+                    fileId: undefined 
                 });
             }
         }
@@ -144,10 +147,17 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     } catch(e) { toast.dismiss(toastId); toast.error(e.message || '移动失败'); }
   };
 
+  // 修改：获取直链 (传入 item 对象)
   const handleCopyLink = (key: string) => {
-      const url = api.getFileUrl(key);
-      navigator.clipboard.writeText(url);
-      toast.success('直链已复制');
+      const item = getItemByKey(key);
+      if (!item || item.type === 'folder') return;
+      const url = api.getFileUrl(item); // 传入完整对象
+      if (url) {
+          navigator.clipboard.writeText(url);
+          toast.success('直链已复制');
+      } else {
+          toast.error('无法获取链接');
+      }
   };
 
   const handleItemClick = (e: React.MouseEvent, item: any) => {
@@ -221,8 +231,16 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                     <div className="flex items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-100 animate-in slide-in-from-top-1 fade-in mr-2">
                         {selection.size === 1 && !Array.from(selection)[0].endsWith('/') && (
                             <>
-                                <button onClick={(e) => { e.stopPropagation(); window.open(api.getFileUrl(Array.from(selection)[0]), '_blank'); }} className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-blue-600" title="打开/下载"><Download className="w-4 h-4" /></button>
-                                <button onClick={(e) => { e.stopPropagation(); handleCopyLink(Array.from(selection)[0]); }} className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-blue-600" title="复制直链"><LinkIcon className="w-4 h-4" /></button>
+                                <button onClick={(e) => { 
+                                    e.stopPropagation(); 
+                                    const item = getItemByKey(Array.from(selection)[0]);
+                                    if(item) window.open(api.getFileUrl(item), '_blank'); 
+                                }} className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-blue-600" title="打开/下载"><Download className="w-4 h-4" /></button>
+                                
+                                <button onClick={(e) => { 
+                                    e.stopPropagation(); 
+                                    handleCopyLink(Array.from(selection)[0]); 
+                                }} className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-blue-600" title="复制直链"><LinkIcon className="w-4 h-4" /></button>
                             </>
                         )}
                         {selection.size === 1 && (
@@ -269,7 +287,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                         onDrop={item.isFolder ? (e) => { e.preventDefault(); e.stopPropagation(); setDragOverFolder(null); const data = e.dataTransfer.getData('application/json'); if(data) { const {keys}=JSON.parse(data); keys.forEach((k:string)=>api.moveFile(k, item.key).then(()=>{toast.success('移动成功');onReload();})); } } : undefined}
                         onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); if(!selection.has(item.key)) setSelection(new Set([item.key])); setContextMenu({ x: e.pageX, y: e.pageY, item, visible: true }); }}
                         onClick={(e) => handleItemClick(e, item)}
-                        onDoubleClick={() => !item.isFolder && window.open(api.getFileUrl(item.key), '_blank')}
+                        onDoubleClick={() => !item.isFolder && window.open(api.getFileUrl(item), '_blank')}
                         className={`relative group flex flex-col items-center p-2 rounded-xl border transition-all cursor-pointer aspect-[3/4]
                             ${isSelected ? 'border-blue-500 bg-blue-50 shadow-sm ring-1 ring-blue-500 z-10' : 
                               isDraggingOver ? 'border-blue-500 bg-blue-100 scale-105 shadow-md' : 'border-transparent hover:bg-white hover:shadow-md'}
@@ -282,7 +300,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                             </div>
                         )}
                         <div className="flex-1 w-full flex items-center justify-center overflow-hidden pointer-events-none">
-                            {item.isFolder ? <Folder className="w-16 h-16 text-blue-400/90 fill-blue-100" /> : item.type?.startsWith('image/') ? <img src={api.getFileUrl(item.key)} className="w-full h-full object-contain rounded shadow-sm" loading="lazy" /> : <FileText className="w-14 h-14 text-slate-400" />}
+                            {item.isFolder ? <Folder className="w-16 h-16 text-blue-400/90 fill-blue-100" /> : item.type?.startsWith('image/') ? <img src={api.getFileUrl(item)} className="w-full h-full object-contain rounded shadow-sm" loading="lazy" /> : <FileText className="w-14 h-14 text-slate-400" />}
                         </div>
                         <div className="w-full text-center px-0.5 mt-2">
                             <div className={`text-xs font-medium truncate w-full ${isSelected ? 'text-blue-700' : 'text-slate-700'}`}>{showName}</div>
