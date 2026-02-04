@@ -1,4 +1,3 @@
-// src/components/Login.tsx
 import React, { useState } from 'react';
 import { Lock, Loader2 } from 'lucide-react';
 import toast from 'react-hot-toast';
@@ -47,9 +46,7 @@ export function Login({ onLogin }: LoginProps) {
 
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
           <div>
-            <label htmlFor="password" className="sr-only">
-              密码
-            </label>
+            <label htmlFor="password" className="sr-only">密码</label>
             <input
               id="password"
               name="password"
