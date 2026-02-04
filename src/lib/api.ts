@@ -4,25 +4,22 @@ export interface FileItem {
   type: string;
   size: number;
   uploadedAt: number;
-  displayPath?: string; 
 }
 
 const TOKEN_KEY = 'auth_token';
 const LOGIN_TIME_KEY = 'login_timestamp';
 const SEP = '|';
-const TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 小时
+const TIMEOUT_MS = 12 * 60 * 60 * 1000; 
 
 function toBase64(str: string) {
     return btoa(unescape(encodeURIComponent(str)));
 }
 
 export const api = {
-  // 检查登录是否超时
   checkAuth() {
       const timeStr = localStorage.getItem(LOGIN_TIME_KEY);
       if (!timeStr) return false;
-      const time = parseInt(timeStr, 10);
-      if (Date.now() - time > TIMEOUT_MS) {
+      if (Date.now() - parseInt(timeStr) > TIMEOUT_MS) {
           this.logout();
           return false;
       }
@@ -47,7 +44,6 @@ export const api = {
         if (res.ok) {
             const data = await res.json();
             localStorage.setItem(TOKEN_KEY, data.token);
-            // 记录登录时间
             localStorage.setItem(LOGIN_TIME_KEY, Date.now().toString());
             return true;
         }
@@ -56,7 +52,7 @@ export const api = {
   },
 
   async listFiles(): Promise<FileItem[]> {
-    if (!this.checkAuth()) throw new Error('Session Expired');
+    if (!this.checkAuth()) return [];
     try {
         const token = this.getToken();
         const res = await fetch('/api/list', { headers: { 'Authorization': `Bearer ${token}` } });
@@ -64,7 +60,7 @@ export const api = {
             const data = await res.json();
             return data.files.map((f: FileItem) => ({
                 ...f,
-                key: f.key.replace(new RegExp('\\' + SEP, 'g'), '/')
+                key: f.key.replaceAll(SEP, '/') // 转回 UI 路径
             }));
         }
         throw new Error('API Error');
@@ -72,11 +68,11 @@ export const api = {
   },
 
   toStoreKey(uiKey: string) {
-      return uiKey.replace(/\//g, SEP);
+      return uiKey.replaceAll('/', SEP);
   },
 
   async createFolder(path: string): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Session Expired');
+    if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     await fetch('/api/create-folder', {
         method: 'POST',
@@ -86,15 +82,13 @@ export const api = {
   },
 
   async upload(file: File, folderPath: string): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Session Expired');
+    if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     const safeName = file.name.replace(/[|]/g, '_');
     const safeFile = new File([file], safeName, { type: file.type });
-    
     const formData = new FormData();
     formData.append('file', safeFile);
     formData.append('folder', folderPath); 
-    
     await fetch('/api/upload', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` },
@@ -103,7 +97,7 @@ export const api = {
   },
   
   async batchDelete(uiKeys: string[]): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Session Expired');
+    if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     const storeKeys = uiKeys.map(k => this.toStoreKey(k));
     await fetch('/api/batch-delete', {
@@ -114,7 +108,7 @@ export const api = {
   },
 
   async moveFile(sourceUiKey: string, targetPath: string): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Session Expired');
+    if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     await fetch('/api/move', {
         method: 'POST',
