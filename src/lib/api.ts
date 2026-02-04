@@ -1,7 +1,7 @@
 // src/lib/api.ts
 
 export interface FolderItem {
-  key: string;          // 'a/b/'
+  key: string; // 'a/b/'
   folderId: string;
   name: string;
   type: 'folder';
@@ -11,7 +11,7 @@ export interface FolderItem {
 }
 
 export interface FileItem {
-  key: string;          // 'a/b/x.js'
+  key: string; // 'a/b/x.js'
   fileId: string;
   name: string;
   type: string;
