@@ -165,9 +165,8 @@
 
 ---
 
-# 本地开发
+## 💻 本地开发
 
-```bash
 # 安装依赖
 npm install
 
@@ -175,7 +174,7 @@ npm install
 npm run dev
 ⚠️ 注意：本地开发模式无法连接真实的 Cloudflare KV，会自动使用浏览器 LocalStorage 模拟数据，仅供测试 UI。
 
-故障排除
+🛠️ 故障排除
 问题	原因	解决方案
 Error 1101	KV 未正确绑定	检查 Variable name 是否为 MY_BUCKET
 Login Failed	密码配置错误	检查环境变量 PASSWORD 是否设置正确（默认密码为 admin）
