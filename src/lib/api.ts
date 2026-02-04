@@ -114,7 +114,6 @@ export const api = {
 
      if (!fileId) return '';
 
-     // 直接拼接 ID (已经带后缀了)
      return `${window.location.origin}/file/${fileId}`;
   }
 };
