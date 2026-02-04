@@ -1,4 +1,3 @@
-// src/App.tsx
 import { useState, useEffect } from 'react';
 import { Toaster } from 'react-hot-toast';
 import { Login } from './components/Login';
