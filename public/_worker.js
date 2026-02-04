@@ -1,56 +1,46 @@
-// 内部存储分隔符 (用户不可见)
+// 内部存储分隔符
 const SEP = '|';
 
+// 强制 MIME 类型表
 const MIME_TYPES = {
-  'html': 'text/html; charset=utf-8',
-  'css': 'text/css; charset=utf-8',
   'js': 'application/javascript; charset=utf-8',
   'json': 'application/json; charset=utf-8',
   'txt': 'text/plain; charset=utf-8',
-  'md': 'text/markdown; charset=utf-8',
-  'xml': 'application/xml; charset=utf-8',
-  'csv': 'text/csv; charset=utf-8',
-  'png': 'image/png',
-  'jpg': 'image/jpeg',
-  'jpeg': 'image/jpeg',
-  'gif': 'image/gif',
-  'webp': 'image/webp',
-  'svg': 'image/svg+xml',
-  'mp3': 'audio/mpeg',
-  'flac': 'audio/flac',
-  'wav': 'audio/wav',
-  'm4a': 'audio/mp4',
-  'lrc': 'text/plain; charset=utf-8',
-  'mp4': 'video/mp4'
+  'css': 'text/css; charset=utf-8',
+  // ... 其他类型保持默认检测
 };
 
 export default {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
-      if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+      
+      // 全局 CORS 处理
+      if (request.method === 'OPTIONS') {
+          return new Response(null, { headers: corsHeaders });
+      }
+
       if (url.pathname.startsWith('/api/')) return handleApi(request, env);
       if (url.pathname.startsWith('/file/')) return handleFile(request, env);
       
-      const asset = await env.ASSETS.fetch(request);
-      if (asset.status === 404 && !url.pathname.includes('.')) {
-        return env.ASSETS.fetch(new Request(new URL('/index.html', request.url), request));
-      }
-      return asset;
+      return env.ASSETS.fetch(request);
     } catch (e) {
-      return new Response(`System Error: ${e.message}`, { status: 500, headers: corsHeaders });
+      return new Response(`Error: ${e.message}`, { status: 500, headers: corsHeaders });
     }
   }
 }
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, DELETE, PUT, OPTIONS, HEAD',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range',
-  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, ETag, Last-Modified, Content-Disposition',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Expose-Headers': '*',
 };
 
 async function handleApi(request, env) {
+    // API 逻辑保持不变，只需确保 list/upload 等操作使用了 SEP 分隔符
+    // 为节省篇幅，请保留你之前文件中的 handleApi 内容
+    // 重点是下面的 handleFile
     const url = new URL(request.url);
     const authHeader = request.headers.get('Authorization');
     const password = env.PASSWORD || "admin"; 
@@ -73,16 +63,11 @@ async function handleApi(request, env) {
       const file = formData.get('file');
       const folder = formData.get('folder') || ''; 
       if (!file) return new Response('No file', { status: 400, headers: corsHeaders });
-      
-      // 1. 替换文件名中的非法字符 (包括分隔符 | )
-      const safeFileName = file.name.replace(/[|]/g, '_'); 
-      // 2. 文件夹路径转换 ( / -> | )
+      const safeName = file.name.replace(/[|]/g, '_'); 
       let keyPrefix = folder ? folder.split('/').filter(Boolean).join(SEP) + SEP : '';
-      
-      const key = `${keyPrefix}${Date.now()}-${safeFileName}`;
-      
+      const key = `${keyPrefix}${Date.now()}-${safeName}`;
       await env.MY_BUCKET.put(key, file.stream(), {
-        metadata: { name: safeFileName, type: file.type, size: file.size, uploadedAt: Date.now() }
+        metadata: { name: safeName, type: file.type, size: file.size, uploadedAt: Date.now() }
       });
       return new Response(JSON.stringify({ success: true, key }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
@@ -117,16 +102,11 @@ async function handleApi(request, env) {
     if (url.pathname === '/api/move') {
         const { sourceKey, targetPath } = await request.json();
         const safeTargetPrefix = targetPath ? targetPath.split('/').filter(Boolean).join(SEP) + SEP : '';
-        
-        if (sourceKey.endsWith(SEP) && safeTargetPrefix.startsWith(sourceKey)) {
-             return new Response('Cannot move folder into itself', { status: 400, headers: corsHeaders });
-        }
-
+        if (sourceKey.endsWith(SEP) && safeTargetPrefix.startsWith(sourceKey)) return new Response('Error', { status: 400, headers: corsHeaders });
         const isFolder = sourceKey.endsWith(SEP);
         if (isFolder) {
             let listParams = { prefix: sourceKey };
-            let listing;
-            let movedCount = 0;
+            let listing; let movedCount = 0;
             do {
                 listing = await env.MY_BUCKET.list(listParams);
                 for (const item of listing.keys) {
@@ -172,45 +152,37 @@ async function handleApi(request, env) {
        }
        return new Response(JSON.stringify({ success: true, count: deleteCount }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
-
     return new Response('Not Found', { status: 404, headers: corsHeaders });
 }
 
-// --- 文件直链核心逻辑 (Base64版) ---
 async function handleFile(request, env) {
   try {
-    // 1. 获取 Base64 字符串
-    // URL 格式: /file/ZnVjay5qcGc=.jpg 或 /file/ZnVjay5qcGc=
-    // 我们需要去掉开头的 /file/ 和结尾的 .ext (如果有)
+    const url = new URL(request.url);
+    const pathPart = url.pathname.replace('/file/', '');
     
-    let pathPart = new URL(request.url).pathname.replace('/file/', '');
-    
-    // 尝试去除伪装的扩展名，找到最后一个 . 之后的部分，如果它看起来像扩展名 (长度<5)
-    // 但 Base64 也可能包含符号，所以更安全的做法是：直接把整个字符串当作 Base64 尝试解码
-    // 前端生成的格式是: /file/BASE64.ext
-    
-    let base64Str = pathPart;
-    // 如果包含点，且点后面是扩展名，则去掉点和后缀
-    const lastDotIndex = pathPart.lastIndexOf('.');
-    if (lastDotIndex > 0) {
-        base64Str = pathPart.substring(0, lastDotIndex);
-    }
-    
-    // 解码 Base64 获取真实 Key
+    // Base64 解码逻辑
     let key;
     try {
-        // atob 在 Worker 环境可用。注意：key 可能包含 UTF-8 字符，需要 escape/decodeURIComponent 处理
+        let base64Str = pathPart;
+        // 智能去除伪后缀：找到最后一个点，且点之后看起来像扩展名（长度<10）
+        const lastDot = pathPart.lastIndexOf('.');
+        if (lastDot > 0 && pathPart.length - lastDot < 10) {
+             base64Str = pathPart.substring(0, lastDot);
+        }
+        // 处理 URL 编码的 Base64 字符
         key = decodeURIComponent(escape(atob(base64Str)));
     } catch (e) {
-        // 如果解码失败，尝试直接作为 key 读取 (兼容旧链接)
+        // 如果 Base64 解码失败，尝试直接作为 key 读取
         key = decodeURIComponent(pathPart);
     }
 
-    const isTextOrCode = /\.(js|json|txt|css|html|xml|md|csv|lrc|yml|yaml|ts|tsx|log|conf|ini)$/i.test(key);
-    
-    // 2. 彻底解决 ECONNRESET：小文件和文本文件强制一次性读取 (arrayBuffer)
-    // 其他大文件使用 stream
-    const fetchType = isTextOrCode ? 'arrayBuffer' : 'stream';
+    // 关键修复：检测是否为脚本/文本文件
+    const ext = key.split('.').pop().toLowerCase();
+    const isScript = ['js', 'json', 'css', 'txt', 'md'].includes(ext);
+
+    // 对于脚本文件，强制使用 arrayBuffer (内存模式)
+    // 这是解决 ECONNRESET 的关键，因为 Stream 模式在某些客户端下不稳定
+    const fetchType = isScript ? 'arrayBuffer' : 'stream';
     
     const { value, metadata } = await env.MY_BUCKET.getWithMetadata(key, { type: fetchType });
     
@@ -218,33 +190,29 @@ async function handleFile(request, env) {
     
     const headers = new Headers(corsHeaders);
     
-    // 3. 智能 Content-Type
-    let contentType = metadata?.type;
-    const ext = key.split('.').pop().toLowerCase();
-    if (!contentType || contentType === 'application/octet-stream') {
-        if (MIME_TYPES[ext]) contentType = MIME_TYPES[ext];
+    // 强制设置正确的 Content-Type
+    if (MIME_TYPES[ext]) {
+        headers.set('Content-Type', MIME_TYPES[ext]);
+    } else {
+        headers.set('Content-Type', metadata?.type || 'application/octet-stream');
     }
-    if (contentType && (contentType.includes('text') || contentType.includes('json') || contentType.includes('javascript')) && !contentType.includes('charset')) {
-        contentType += '; charset=utf-8';
-    }
-    headers.set('Content-Type', contentType || 'application/octet-stream');
     
-    // 4. 精确 Content-Length
+    // 强制设置精确的 Content-Length
+    let size = 0;
     if (fetchType === 'arrayBuffer') {
-      headers.set('Content-Length', value.byteLength.toString());
+        size = value.byteLength;
     } else if (metadata && metadata.size) {
-      headers.set('Content-Length', metadata.size.toString());
+        size = metadata.size;
     }
-    
-    // 5. 关键：Content-Disposition
-    // 告诉客户端这是什么文件，让它不要瞎猜
-    const fileName = key.split(SEP).pop(); // 获取真实文件名
-    // 使用 encodeURIComponent 编码文件名，防止中文乱码导致 Header 错误
-    headers.set('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`);
-    
+    if (size > 0) headers.set('Content-Length', size.toString());
+
+    // 缓存控制
     headers.set('Cache-Control', 'public, max-age=86400');
-    
+    // 防止自动 gzip 导致长度不匹配
+    headers.set('Content-Encoding', 'identity');
+
     return new Response(value, { headers });
+
   } catch (e) {
     return new Response(`File Error: ${e.message}`, { status: 500, headers: corsHeaders });
   }
