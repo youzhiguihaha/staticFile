@@ -226,7 +226,7 @@ async function handleFile(request, env) {
     const lastDot = fileId.lastIndexOf('.');
     if (lastDot > 0) fileId = fileId.substring(0, lastDot);
 
-    if (fileId.length < 5) return new Response('Invalid ID', { status: 400 });
+    if (fileId.length < 5) return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
 
     const ext = pathPart.split('.').pop().toLowerCase();
     
