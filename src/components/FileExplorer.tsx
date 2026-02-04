@@ -24,7 +24,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
 
-  // --- 视图计算 ---
   const viewItems = useMemo(() => {
     if (searchQuery) {
         return files.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase())).map(f => ({
@@ -75,7 +74,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selection, viewItems]);
 
-  // --- 逻辑方法 ---
   const handleNavigate = (path: string) => {
       if (!path.endsWith('/')) {
          const parts = path.split('/');
@@ -99,7 +97,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
     if (!name) return;
     const cleanName = name.replace(/[\/\\]/g, '').trim();
     if (!cleanName) { toast.error('名称不能为空'); return; }
-    
     try {
         await api.createFolder(currentPath + cleanName);
         toast.success('文件夹创建成功');
@@ -202,14 +199,11 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                }
            }}
       >
-          {/* 顶部工具栏 */}
           <div className="px-4 py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20 h-14">
              <div className="flex items-center gap-2 overflow-hidden flex-1">
                 <button className="sm:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full" onClick={() => setShowSidebar(true)}><Menu className="w-5 h-5" /></button>
                 <button onClick={(e) => { e.stopPropagation(); currentPath && handleNavigate(currentPath.split('/').slice(0, -2).join('/') + (currentPath.split('/').length > 2 ? '/' : '')); }} disabled={!currentPath} className={`p-2 rounded-lg transition-all ${currentPath ? 'hover:bg-slate-100 text-slate-600' : 'text-slate-300'}`}><ArrowLeft className="w-5 h-5" /></button>
-                <div className="text-sm font-medium text-slate-700 truncate px-2" title={currentPath}>
-                    {searchQuery ? '搜索结果' : (currentPath ? currentPath.split('/').filter(Boolean).pop() : '根目录')}
-                </div>
+                <div className="text-sm font-medium text-slate-700 truncate px-2" title={currentPath}>{searchQuery ? '搜索结果' : (currentPath ? currentPath.split('/').filter(Boolean).pop() : '根目录')}</div>
              </div>
 
              <div className="flex items-center gap-2">
@@ -235,12 +229,7 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                             <input type="text" placeholder="搜索..." className="w-[140px] pl-9 pr-4 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:border-blue-500 outline-none transition-all" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onClick={e => e.stopPropagation()} />
                         </div>
-                        
-                        {/* 关键修复：新建文件夹按钮回归 */}
-                        <button onClick={(e) => { e.stopPropagation(); handleCreateFolder(); }} className="p-2 text-slate-600 hover:bg-blue-50 hover:text-blue-600 rounded-lg transition-colors" title="新建文件夹">
-                            <FolderPlus className="w-5 h-5" />
-                        </button>
-
+                        <button onClick={(e) => { e.stopPropagation(); handleCreateFolder(); }} className="p-2 text-slate-600 hover:bg-blue-50 hover:text-blue-600 rounded-lg transition-colors" title="新建文件夹"><FolderPlus className="w-5 h-5" /></button>
                         <button onClick={(e) => { e.stopPropagation(); setIsMultiSelectMode(!isMultiSelectMode); if(isMultiSelectMode) setSelection(new Set()); }} className={`p-2 rounded-lg transition-all ${isMultiSelectMode ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`} title="多选模式"><CheckSquare className="w-5 h-5" /></button>
                     </>
                 )}
@@ -260,7 +249,6 @@ export function FileExplorer({ files, onReload, onUpload }: Props) {
                  const isSelected = selection.has(item.key);
                  const isDraggingOver = dragOverFolder === item.key;
                  const showName = item.displayName || item.name;
-                 
                  return (
                      <div 
                         key={item.key} 
