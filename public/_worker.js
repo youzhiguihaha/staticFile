@@ -280,21 +280,32 @@ async function handleApi(request, env) {
   const url = new URL(request.url);
 
   // ===== login =====
-  if (url.pathname === '/api/login') {
-    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
-    const body = await request.json().catch(() => null);
+if (url.pathname === '/api/login') {
+  if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+
+  try {
+    const body = await request.json().catch(() => ({}));
     const ok = await verifyPassword(env, body?.password || '');
+
     if (!ok) {
-      return new Response(JSON.stringify({ success: false }), {
+      return new Response(JSON.stringify({ success: false, reason: 'bad_password' }), {
         status: 401,
         headers: { 'Content-Type': 'application/json', ...BASE_CORS },
       });
     }
+
     const token = await issueToken(env);
-    return new Response(JSON.stringify({ success: true, token, expiresInMs: TOKEN_TTL_MS }), {
+    return new Response(JSON.stringify({ success: true, token }), {
+      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
+    });
+
+  } catch (e) {
+    return new Response(JSON.stringify({ success: false, reason: 'server_error', error: String(e?.message || e) }), {
+      status: 500,
       headers: { 'Content-Type': 'application/json', ...BASE_CORS },
     });
   }
+}
 
   // ===== auth required =====
   const auth = await requireAuth(request, env);
