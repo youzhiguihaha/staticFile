@@ -35,7 +35,11 @@ const BIN_PREFIX = 'bin:'; // bin:<fileId>
 
 // ======= Auth config =======
 const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 12h
-const DEFAULT_PBKDF2_ITER = 200000;
+
+// Cloudflare Workers WebCrypto PBKDF2 iterations 上限：100000
+const DEFAULT_PBKDF2_ITER = 100000;
+const MAX_PBKDF2_ITER = 100000;
+const MIN_PBKDF2_ITER = 10000; // 给个下限，避免误填太小
 
 // ======= Utils =======
 function now() {
@@ -110,7 +114,7 @@ function constantTimeEqualHex(a, b) {
 let _hmacKeyPromise = null;
 
 async function getHmacKey(env) {
-  const secret = env.TOKEN_SECRET;
+  const secret = (env.TOKEN_SECRET || '').trim();
   if (!secret) throw new Error('TOKEN_SECRET missing');
 
   if (!_hmacKeyPromise) {
@@ -141,7 +145,16 @@ async function pbkdf2Hex(password, saltBytes, iterations, lengthBytes = 32) {
   return bytesToHex(new Uint8Array(bits));
 }
 
+function getIterations(env) {
+  const raw = parseInt((env.PBKDF2_ITERATIONS || '').toString(), 10);
+  const v = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PBKDF2_ITER;
+  // 强制范围：MIN..MAX（并且 MAX=100000，避免你再遇到 500）
+  return Math.min(Math.max(v, MIN_PBKDF2_ITER), MAX_PBKDF2_ITER);
+}
+
 async function verifyPassword(env, passwordInput) {
+  passwordInput = (passwordInput || '').trim();
+
   const hashHex = (env.PASSWORD_HASH_HEX || '').trim().toLowerCase();
   const saltHex = (env.PASSWORD_SALT_HEX || '').trim().toLowerCase();
 
@@ -149,13 +162,14 @@ async function verifyPassword(env, passwordInput) {
   if (hashHex && saltHex) {
     const salt = hexToBytes(saltHex);
     if (!salt) return false;
-    const iterations = parseInt(env.PBKDF2_ITERATIONS || `${DEFAULT_PBKDF2_ITER}`, 10);
+
+    const iterations = getIterations(env);
     const derived = await pbkdf2Hex(passwordInput, salt, iterations, 32);
     return constantTimeEqualHex(derived, hashHex);
   }
 
   // 兼容明文模式（不推荐）
-  const plain = env.PASSWORD_PLAIN || env.PASSWORD || '';
+  const plain = (env.PASSWORD_PLAIN || env.PASSWORD || '').toString();
   return passwordInput === plain;
 }
 
@@ -279,33 +293,32 @@ export default {
 async function handleApi(request, env) {
   const url = new URL(request.url);
 
-  // ===== login =====
-if (url.pathname === '/api/login') {
-  if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+  // ===== login（带错误信息，避免你“看不见原因”）=====
+  if (url.pathname === '/api/login') {
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
 
-  try {
-    const body = await request.json().catch(() => ({}));
-    const ok = await verifyPassword(env, body?.password || '');
+    try {
+      const body = await request.json().catch(() => ({}));
+      const ok = await verifyPassword(env, body?.password || '');
 
-    if (!ok) {
-      return new Response(JSON.stringify({ success: false, reason: 'bad_password' }), {
-        status: 401,
+      if (!ok) {
+        return new Response(JSON.stringify({ success: false, reason: 'bad_password' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json', ...BASE_CORS },
+        });
+      }
+
+      const token = await issueToken(env);
+      return new Response(JSON.stringify({ success: true, token, expiresInMs: TOKEN_TTL_MS }), {
+        headers: { 'Content-Type': 'application/json', ...BASE_CORS },
+      });
+    } catch (e) {
+      return new Response(JSON.stringify({ success: false, reason: 'server_error', error: String(e?.message || e) }), {
+        status: 500,
         headers: { 'Content-Type': 'application/json', ...BASE_CORS },
       });
     }
-
-    const token = await issueToken(env);
-    return new Response(JSON.stringify({ success: true, token }), {
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-    });
-
-  } catch (e) {
-    return new Response(JSON.stringify({ success: false, reason: 'server_error', error: String(e?.message || e) }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-    });
   }
-}
 
   // ===== auth required =====
   const auth = await requireAuth(request, env);
@@ -413,7 +426,6 @@ if (url.pathname === '/api/login') {
 
     dir.files = dir.files || {};
 
-    // 保护：避免单次 invocation 外部操作过多
     if (files.length > 200) return new Response('Too many files in one request', { status: 413, headers: BASE_CORS });
 
     for (const f of files) {
@@ -433,16 +445,12 @@ if (url.pathname === '/api/login') {
 
       dir.files[name] = {
         fileId,
-        type:
-          file.type ||
-          MIME_TYPES[(ext.slice(1) || '').toLowerCase()] ||
-          'application/octet-stream',
+        type: file.type || MIME_TYPES[(ext.slice(1) || '').toLowerCase()] || 'application/octet-stream',
         size: file.size || 0,
         uploadedAt: now(),
       };
     }
 
-    // 目录 shard 只写一次
     await putDir(env, dir);
 
     return new Response(JSON.stringify({ success: true }), {
@@ -464,7 +472,6 @@ if (url.pathname === '/api/login') {
     targetDir.folders = targetDir.folders || {};
     targetDir.files = targetDir.files || {};
 
-    // fromFolderId 分组：每个源目录只读/写一次
     const group = new Map(); // fromId -> { files:[], folders:[] }
     for (const it of items) {
       const fromId = (it?.fromFolderId || '').trim();
@@ -493,7 +500,6 @@ if (url.pathname === '/api/login') {
       sourceDirs.set(fromId, d);
     }
 
-    // move：先文件后文件夹
     for (const [fromId, g] of group.entries()) {
       const src = sourceDirs.get(fromId);
 
@@ -519,7 +525,6 @@ if (url.pathname === '/api/login') {
         targetDir.folders[newName] = folderId;
         delete src.folders[name];
 
-        // 更新被移动目录 parentId / name（额外一次写，必须）
         const moved = await getDir(env, folderId);
         if (moved) {
           moved.parentId = targetFolderId;
@@ -545,7 +550,6 @@ if (url.pathname === '/api/login') {
     const items = Array.isArray(body?.items) ? body.items : [];
     if (!items.length) return new Response('No items', { status: 400, headers: BASE_CORS });
 
-    // 保护：避免一次删太多导致 invocation 失败
     const MAX_BIN_DELETES = 900;
 
     const group = new Map(); // fromId -> { files:[], folders:[] }
@@ -590,7 +594,6 @@ if (url.pathname === '/api/login') {
     for (const [fromId, g] of group.entries()) {
       const src = sourceDirs.get(fromId);
 
-      // files
       for (const f of g.files) {
         const name = cleanName(f?.name || '');
         const fileId = (f?.fileId || '').trim();
@@ -605,7 +608,6 @@ if (url.pathname === '/api/login') {
         }
       }
 
-      // folders
       for (const fd of g.folders) {
         const name = cleanName(fd?.name || '');
         const folderId = (fd?.folderId || '').trim();
@@ -625,14 +627,11 @@ if (url.pathname === '/api/login') {
       }
     }
 
-    // 每个源目录 shard 写一次
     for (const d of sourceDirs.values()) await putDir(env, d);
 
-    // delete bins（去重，避免浪费 delete）
     const uniqBin = Array.from(new Set(binToDelete));
     for (const k of uniqBin) await env.MY_BUCKET.delete(k);
 
-    // delete dirs（去重）
     const uniqDir = Array.from(new Set(dirToDelete));
     for (const k of uniqDir) await env.MY_BUCKET.delete(k);
 
