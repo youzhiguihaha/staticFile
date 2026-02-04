@@ -8,16 +8,34 @@ export interface FileItem {
 }
 
 const TOKEN_KEY = 'auth_token';
+const LOGIN_TIME_KEY = 'login_timestamp';
 const SEP = '|';
+const TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 小时
 
-// Base64 编码辅助 (处理 UTF-8)
 function toBase64(str: string) {
     return btoa(unescape(encodeURIComponent(str)));
 }
 
 export const api = {
+  // 检查是否超时
+  checkAuth() {
+      const timeStr = localStorage.getItem(LOGIN_TIME_KEY);
+      if (!timeStr) return false;
+      const time = parseInt(timeStr, 10);
+      if (Date.now() - time > TIMEOUT_MS) {
+          this.logout();
+          return false;
+      }
+      return !!localStorage.getItem(TOKEN_KEY);
+  },
+
   getToken: () => localStorage.getItem(TOKEN_KEY),
-  logout: () => localStorage.removeItem(TOKEN_KEY),
+  
+  logout: () => {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(LOGIN_TIME_KEY);
+      window.location.reload(); // 强制刷新回登录页
+  },
 
   async login(password: string): Promise<boolean> {
     try {
@@ -29,6 +47,7 @@ export const api = {
         if (res.ok) {
             const data = await res.json();
             localStorage.setItem(TOKEN_KEY, data.token);
+            localStorage.setItem(LOGIN_TIME_KEY, Date.now().toString()); // 记录登录时间
             return true;
         }
         return false;
@@ -36,6 +55,7 @@ export const api = {
   },
 
   async listFiles(): Promise<FileItem[]> {
+    if (!this.checkAuth()) throw new Error('Session Expired');
     try {
         const token = this.getToken();
         const res = await fetch('/api/list', { headers: { 'Authorization': `Bearer ${token}` } });
@@ -43,7 +63,6 @@ export const api = {
             const data = await res.json();
             return data.files.map((f: FileItem) => ({
                 ...f,
-                // UI 仍然使用 / 作为逻辑分隔符，方便 split 操作
                 key: f.key.replaceAll(SEP, '/')
             }));
         }
@@ -56,6 +75,7 @@ export const api = {
   },
 
   async createFolder(path: string): Promise<void> {
+    if (!this.checkAuth()) throw new Error('Session Expired');
     const token = this.getToken();
     await fetch('/api/create-folder', {
         method: 'POST',
@@ -65,9 +85,8 @@ export const api = {
   },
 
   async upload(file: File, folderPath: string): Promise<void> {
+    if (!this.checkAuth()) throw new Error('Session Expired');
     const token = this.getToken();
-    
-    // 前端也做一次过滤，防止 UI 显示不一致
     const safeName = file.name.replace(/[|]/g, '_');
     const safeFile = new File([file], safeName, { type: file.type });
     
@@ -83,6 +102,7 @@ export const api = {
   },
   
   async batchDelete(uiKeys: string[]): Promise<void> {
+    if (!this.checkAuth()) throw new Error('Session Expired');
     const token = this.getToken();
     const storeKeys = uiKeys.map(k => this.toStoreKey(k));
     await fetch('/api/batch-delete', {
@@ -93,6 +113,7 @@ export const api = {
   },
 
   async moveFile(sourceUiKey: string, targetPath: string): Promise<void> {
+    if (!this.checkAuth()) throw new Error('Session Expired');
     const token = this.getToken();
     await fetch('/api/move', {
         method: 'POST',
@@ -105,19 +126,11 @@ export const api = {
   },
 
   getFileUrl(uiKey: string) {
-     // 1. 获取真实 KV Key (包含 | )
      const storeKey = this.toStoreKey(uiKey);
-     
-     // 2. Base64 编码 (彻底隐藏路径结构)
      const b64 = toBase64(storeKey);
-     
-     // 3. 加上扩展名伪装 (让客户端识别文件类型)
-     // 获取真实扩展名
      const parts = storeKey.split('.');
      const ext = parts.length > 1 ? parts.pop() : '';
      const suffix = ext ? `.${ext}` : '';
-     
-     // 结果: /file/BASE64STRING.mp3
      return `${window.location.origin}/file/${b64}${suffix}`;
   }
 };
