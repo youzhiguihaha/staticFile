@@ -1,3 +1,4 @@
+// src/components/FileExplorer.tsx
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, ExplorerItem, FileItem, FolderItem, MoveItem, DeleteItem } from '../lib/api';
 import {
@@ -460,7 +461,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
       {Array.from({ length: 12 }).map((_, i) => (
         <div
           key={`skg-${i}`}
-          className="animate-pulse flex flex-col items-center p-2 rounded-xl border border-transparent bg-white/60 aspect-[3/4] pointer-events-none"
+          className="animate-pulse flex flex-col items-center p-2 rounded-xl border border-transparent bg-white/60 aspect-square sm:aspect-[3/4] pointer-events-none"
         >
           <div className="flex-1 w-full rounded-lg bg-slate-200/70" />
           <div className="w-full mt-2 px-1">
@@ -476,16 +477,16 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
       {Array.from({ length: 8 }).map((_, i) => (
         <div
           key={`skl-${i}`}
-          className="animate-pulse grid grid-cols-[minmax(0,1fr),80px,120px] sm:grid-cols-[minmax(0,1fr),120px,160px] gap-2 px-3 py-2 text-sm border-b border-slate-100"
+          className="animate-pulse grid grid-cols-[minmax(0,1fr)] sm:grid-cols-[minmax(0,1fr),120px,160px] gap-2 px-3 py-2 text-sm border-b border-slate-100"
         >
           <div className="flex items-center gap-2 min-w-0">
             <div className="w-4 h-4 bg-slate-200/80 rounded" />
             <div className="h-3 w-48 max-w-[60%] bg-slate-200/80 rounded" />
           </div>
-          <div className="flex justify-end">
+          <div className="hidden sm:flex justify-end">
             <div className="h-3 w-10 bg-slate-200/80 rounded" />
           </div>
-          <div className="flex justify-end">
+          <div className="hidden sm:flex justify-end">
             <div className="h-3 w-20 bg-slate-200/80 rounded" />
           </div>
         </div>
@@ -735,12 +736,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
     } catch {
       toast.error('复制失败（浏览器权限限制）');
     }
-  };
-
-  const handleOpen = (key: string) => {
-    const it = itemsByKey.get(key);
-    if (!it || isFolder(it)) return;
-    window.open(api.getFileUrl(it.fileId), '_blank');
   };
 
   const openMoveToDialog = () => {
@@ -1097,12 +1092,12 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
   // ======= Render =======
   return (
-    <div className="bg-white rounded-xl shadow-2xl shadow-slate-200/50 border border-slate-200 overflow-hidden min-h-[600px] flex flex-col sm:flex-row select-none relative">
+    <div className="bg-white rounded-xl shadow-2xl shadow-slate-200/50 border border-slate-200 overflow-hidden min-h-[min(600px,100svh)] flex flex-col sm:flex-row select-none relative">
       {showSidebar && <div className="fixed inset-0 bg-black/20 z-30 sm:hidden" onClick={() => setShowSidebar(false)} />}
 
       {/* Sidebar */}
       <div
-        className={`absolute sm:relative z-40 w-64 h-full bg-white transition-transform duration-300 transform border-r border-slate-100 ${
+        className={`absolute sm:relative z-40 w-[min(16rem,85vw)] sm:w-64 h-full bg-white transition-transform duration-300 transform border-r border-slate-100 ${
           showSidebar ? 'translate-x-0' : '-translate-x-full sm:translate-x-0'
         } flex-shrink-0`}
       >
@@ -1154,7 +1149,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         }}
       >
         {/* Top bar */}
-        <div className="px-4 py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20">
+        <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap gap-2 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20">
           <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0">
             <button
               className="sm:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full"
@@ -1178,8 +1173,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
               <ArrowLeft className="w-5 h-5" />
             </button>
 
-            {/* Breadcrumb */}
-            <div className="flex items-center gap-1 text-sm min-w-0">
+            {/* Breadcrumb（移动端可横向滚动） */}
+            <div className="flex items-center gap-1 text-sm min-w-0 overflow-x-auto whitespace-nowrap [scrollbar-width:none] [-ms-overflow-style:none]">
               {crumbs.map((c, idx) => {
                 const active = idx === crumbs.length - 1;
                 return (
@@ -1209,13 +1204,13 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
               </span>
             )}
 
-            {loading && <span className="text-xs text-slate-400 ml-2">加载中...</span>}
+            {loading && <span className="text-xs text-slate-400 ml-2 whitespace-nowrap">加载中...</span>}
           </div>
 
-          {/* Actions */}
-          <div className="flex items-center gap-2">
+          {/* Actions（允许换行，避免小屏溢出；不隐藏功能入口） */}
+          <div className="flex items-center gap-1 sm:gap-2 flex-wrap justify-end max-w-full">
             {selection.size > 0 ? (
-              <div className="flex items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-100">
+              <div className="flex items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-100 flex-wrap">
                 {selection.size === 1 && singleSelected && !isFolder(singleSelected) && (
                   <>
                     <button
@@ -1383,6 +1378,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                   </button>
                 </div>
 
+                {/* 桌面端顶部搜索（保留原行为） */}
                 <div className="relative group hidden md:block">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
@@ -1448,6 +1444,33 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
           </div>
         </div>
 
+        {/* 移动端搜索条：不改变逻辑，只补齐入口 */}
+        <div className="px-4 pb-3 border-b border-slate-100 bg-white md:hidden">
+          <div className="relative">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="搜索(当前目录)..."
+              className="w-full pl-9 pr-9 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-blue-500 outline-none transition-all"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+            />
+            {searchQuery && (
+              <button
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg hover:bg-slate-200 text-slate-500"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSearchQuery('');
+                }}
+                title="清空搜索"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* 剪切状态条 */}
         {clipboard && (
           <div className="px-4 py-2 border-b border-amber-100 bg-amber-50/80">
@@ -1481,10 +1504,10 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
         {/* error bar */}
         {loadError && (
-          <div className="px-4 py-2 border-b border-slate-100 bg-red-50 text-red-700 text-sm flex items-center justify-between">
-            <span>加载失败：{loadError}</span>
+          <div className="px-4 py-2 border-b border-slate-100 bg-red-50 text-red-700 text-sm flex items-center justify-between gap-2">
+            <span className="truncate">加载失败：{loadError}</span>
             <button
-              className="px-3 py-1 rounded bg-white border border-red-200 hover:bg-red-100"
+              className="px-3 py-1 rounded bg-white border border-red-200 hover:bg-red-100 flex-shrink-0"
               onClick={() => load(currentFolderId, currentPath, { bypassCache: true })}
             >
               重试
@@ -1498,7 +1521,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
             <div className="p-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 content-start">
               {!searchQuery && (
                 <label
-                  className={`flex flex-col items-center justify-center p-2 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 hover:bg-blue-50 hover:border-blue-300 cursor-pointer group transition-all aspect-[3/4] ${
+                  className={`flex flex-col items-center justify-center p-2 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 hover:bg-blue-50 hover:border-blue-300 cursor-pointer group transition-all aspect-square sm:aspect-[3/4] ${
                     isUploading ? 'opacity-60 pointer-events-none' : ''
                   }`}
                   onClick={(e) => e.stopPropagation()}
@@ -1536,9 +1559,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     const isFlashing = flashKeys.has(item.key);
                     const isDraggingOver = dragOverFolderKey === item.key;
 
-                    const fileThumb = !isFolder(item) && item.type?.startsWith('image/')
-                      ? api.getFileUrl((item as FileItem).fileId)
-                      : '';
+                    const fileThumb =
+                      !isFolder(item) && item.type?.startsWith('image/') ? api.getFileUrl((item as FileItem).fileId) : '';
 
                     const metaText = isFolder(item)
                       ? '文件夹'
@@ -1563,7 +1585,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                         onDoubleClick={() => {
                           if (!isFolder(item)) window.open(api.getFileUrl((item as FileItem).fileId), '_blank');
                         }}
-                        className={`relative group flex flex-col items-center p-2 rounded-xl border transition-all cursor-pointer aspect-[3/4]
+                        className={`relative group flex flex-col items-center p-2 rounded-xl border transition-all cursor-pointer aspect-square sm:aspect-[3/4]
                           ${
                             selected
                               ? 'border-blue-500 bg-blue-50 shadow-sm ring-1 ring-blue-500 z-10'
@@ -1618,7 +1640,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                           <div className={`text-xs font-medium truncate w-full ${selected ? 'text-blue-700' : 'text-slate-700'}`}>
                             {item.name}
                           </div>
-                          <div className="text-[10px] text-slate-400 mt-0.5 opacity-0 group-hover:opacity-100 transition">
+                          {/* 移动端默认显示，桌面端 hover 显示（不改逻辑，仅提升可见性） */}
+                          <div className="text-[10px] text-slate-400 mt-0.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition">
                             {metaText}
                           </div>
                         </div>
@@ -1631,10 +1654,10 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
           ) : (
             <div className="p-4">
               <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                <div className="grid grid-cols-[minmax(0,1fr),80px,120px] sm:grid-cols-[minmax(0,1fr),120px,160px] gap-2 px-3 py-2 text-xs font-semibold text-slate-500 bg-slate-50 border-b border-slate-200">
+                <div className="grid grid-cols-[minmax(0,1fr)] sm:grid-cols-[minmax(0,1fr),120px,160px] gap-2 px-3 py-2 text-xs font-semibold text-slate-500 bg-slate-50 border-b border-slate-200">
                   <div>名称</div>
-                  <div className="text-right">大小</div>
-                  <div className="text-right">时间</div>
+                  <div className="text-right hidden sm:block">大小</div>
+                  <div className="text-right hidden sm:block">时间</div>
                 </div>
 
                 {showSkeleton ? (
@@ -1646,12 +1669,12 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     const selected = selection.has(item.key);
                     const isFlashing = flashKeys.has(item.key);
                     const sizeText = isFolder(item) ? '-' : formatBytes((item as FileItem).size);
-                    const timeText = formatTime(item.uploadedAt);
+                    const timeText = formatTimeShort(item.uploadedAt);
 
                     return (
                       <div
                         key={item.key}
-                        className={`group grid grid-cols-[minmax(0,1fr),80px,120px] sm:grid-cols-[minmax(0,1fr),120px,160px] gap-2 px-3 py-2 text-sm border-b border-slate-100 cursor-pointer ${
+                        className={`group grid grid-cols-[minmax(0,1fr)] sm:grid-cols-[minmax(0,1fr),120px,160px] gap-2 px-3 py-2 text-sm border-b border-slate-100 cursor-pointer ${
                           selected ? 'bg-blue-50' : isFlashing ? 'bg-emerald-50' : 'hover:bg-slate-50'
                         }`}
                         onClick={(e) => handleItemClick(e, item)}
@@ -1679,8 +1702,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                           </button>
                         </div>
 
-                        <div className="text-right text-slate-600">{sizeText}</div>
-                        <div className="text-right text-slate-500">{timeText}</div>
+                        <div className="hidden sm:block text-right text-slate-600">{sizeText}</div>
+                        <div className="hidden sm:block text-right text-slate-500">{timeText}</div>
                       </div>
                     );
                   })
@@ -1694,7 +1717,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
       {/* ===== 右键菜单（⋯按钮复用它） ===== */}
       {contextMenu.visible && (
         <div
-          className="fixed z-50 bg-white/95 backdrop-blur rounded-lg shadow-xl border border-slate-100 w-52 py-1 overflow-hidden"
+          className="fixed z-50 bg-white/95 backdrop-blur rounded-lg shadow-xl border border-slate-100 w-52 py-1 overflow-auto max-h-[70svh]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -1811,21 +1834,31 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         </div>
       )}
 
-      {/* ===== Move To Dialog ===== */}
+      {/* ===== MoveTo Dialog（只渲染一次，修复重复渲染问题）===== */}
       {moveToOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isMoving && setMoveToOpen(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-4 border border-slate-100" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm"
+          onClick={() => !isMoving && setMoveToOpen(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-4 border border-slate-100 max-h-[90svh] overflow-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center justify-between px-2 py-2">
               <div>
                 <div className="text-base font-bold text-slate-800">移动到...</div>
                 <div className="text-xs text-slate-500 mt-1">已选中 {selection.size} 项</div>
               </div>
-              <button className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" onClick={() => !isMoving && setMoveToOpen(false)} title="关闭">
+              <button
+                className="p-2 rounded-lg hover:bg-slate-100 text-slate-500"
+                onClick={() => !isMoving && setMoveToOpen(false)}
+                title="关闭"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="h-[360px] border border-slate-100 rounded-xl overflow-hidden mx-2">
+            <div className="h-[min(360px,60svh)] border border-slate-100 rounded-xl overflow-hidden mx-2">
               <FolderTree
                 shared={sharedTree}
                 currentFolderId={currentFolderId}
@@ -1846,7 +1879,9 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                 取消
               </button>
               <button
-                className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isMoving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+                className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${
+                  isMoving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+                }`}
                 disabled={isMoving}
                 onClick={confirmMoveTo}
               >
@@ -1859,11 +1894,20 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
       {/* ===== Rename Dialog ===== */}
       {renameDialog.open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isRenaming && setRenameDialog((p) => ({ ...p, open: false }))}>
-          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 border border-slate-100" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm"
+          onClick={() => !isRenaming && setRenameDialog((p) => ({ ...p, open: false }))}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 border border-slate-100 max-h-[90svh] overflow-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center justify-between">
               <div className="text-base font-bold text-slate-800">重命名</div>
-              <button className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" onClick={() => !isRenaming && setRenameDialog((p) => ({ ...p, open: false }))}>
+              <button
+                className="p-2 rounded-lg hover:bg-slate-100 text-slate-500"
+                onClick={() => !isRenaming && setRenameDialog((p) => ({ ...p, open: false }))}
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -1892,7 +1936,9 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                 取消
               </button>
               <button
-                className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isRenaming ? 'bg-blue-300' : 'bg-blue-600 hover:bg-blue-700'}`}
+                className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${
+                  isRenaming ? 'bg-blue-300' : 'bg-blue-600 hover:bg-blue-700'
+                }`}
                 disabled={isRenaming}
                 onClick={confirmRename}
               >
@@ -1906,7 +1952,10 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
       {/* ===== Info Drawer ===== */}
       {infoOpen && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/20" onClick={() => setInfoOpen(false)}>
-          <div className="w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 p-4 overflow-auto" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 p-4 overflow-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center justify-between">
               <div className="text-lg font-bold text-slate-800">详情</div>
               <button className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" onClick={() => setInfoOpen(false)} title="关闭">
@@ -1918,33 +1967,66 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
               <div className="mt-6 text-sm text-slate-500">请选择 1 个文件或文件夹查看详情。</div>
             ) : isFolder(singleSelected) ? (
               <div className="mt-4 space-y-3">
-                <div className="text-sm text-slate-700"><span className="text-slate-400">类型：</span> 文件夹</div>
-                <div className="text-sm text-slate-700"><span className="text-slate-400">名称：</span> {singleSelected.name}</div>
-                <div className="text-sm text-slate-700"><span className="text-slate-400">路径：</span> {singleSelected.key}</div>
-                <div className="text-sm text-slate-700 break-all"><span className="text-slate-400">folderId：</span> {singleSelected.folderId}</div>
+                <div className="text-sm text-slate-700">
+                  <span className="text-slate-400">类型：</span> 文件夹
+                </div>
+                <div className="text-sm text-slate-700">
+                  <span className="text-slate-400">名称：</span> {singleSelected.name}
+                </div>
+                <div className="text-sm text-slate-700">
+                  <span className="text-slate-400">路径：</span> {singleSelected.key}
+                </div>
+                <div className="text-sm text-slate-700 break-all">
+                  <span className="text-slate-400">folderId：</span> {singleSelected.folderId}
+                </div>
 
                 <div className="flex flex-wrap gap-2 pt-2">
-                  <button className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200" onClick={() => copyText(singleSelected.name, '文件夹名已复制')}>
+                  <button
+                    className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200"
+                    onClick={() => copyText(singleSelected.name, '文件夹名已复制')}
+                  >
                     复制名称
                   </button>
-                  <button className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200" onClick={() => copyText(singleSelected.key, '路径已复制')}>
+                  <button
+                    className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200"
+                    onClick={() => copyText(singleSelected.key, '路径已复制')}
+                  >
                     复制路径
                   </button>
-                  <button className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200" onClick={() => copyText(singleSelected.folderId, 'folderId 已复制')}>
+                  <button
+                    className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200"
+                    onClick={() => copyText(singleSelected.folderId, 'folderId 已复制')}
+                  >
                     复制 folderId
                   </button>
                 </div>
               </div>
             ) : (
               <div className="mt-4 space-y-3">
-                <div className="text-sm text-slate-700"><span className="text-slate-400">类型：</span> 文件</div>
-                <div className="text-sm text-slate-700"><span className="text-slate-400">名称：</span> {singleSelected.name}</div>
-                <div className="text-sm text-slate-700"><span className="text-slate-400">路径：</span> {singleSelected.key}</div>
-                <div className="text-sm text-slate-700"><span className="text-slate-400">MIME：</span> {singleSelected.type || '-'}</div>
-                <div className="text-sm text-slate-700"><span className="text-slate-400">大小：</span> {formatBytes(singleSelected.size)}</div>
-                <div className="text-sm text-slate-700"><span className="text-slate-400">上传时间：</span> {formatTime(singleSelected.uploadedAt)}</div>
-                <div className="text-sm text-slate-700 break-all"><span className="text-slate-400">fileId：</span> {singleSelected.fileId}</div>
-                <div className="text-sm text-slate-700 break-all"><span className="text-slate-400">直链：</span> {api.getFileUrl(singleSelected.fileId)}</div>
+                <div className="text-sm text-slate-700">
+                  <span className="text-slate-400">类型：</span> 文件
+                </div>
+                <div className="text-sm text-slate-700">
+                  <span className="text-slate-400">名称：</span> {singleSelected.name}
+                </div>
+                <div className="text-sm text-slate-700">
+                  <span className="text-slate-400">路径：</span> {singleSelected.key}
+                </div>
+                <div className="text-sm text-slate-700">
+                  <span className="text-slate-400">MIME：</span> {singleSelected.type || '-'}
+                </div>
+                <div className="text-sm text-slate-700">
+                  <span className="text-slate-400">大小：</span> {formatBytes(singleSelected.size)}
+                </div>
+                <div className="text-sm text-slate-700">
+                  <span className="text-slate-400">上传时间：</span> {formatTime(singleSelected.uploadedAt)}
+                </div>
+                <div className="text-sm text-slate-700 break-all">
+                  <span className="text-slate-400">fileId：</span> {singleSelected.fileId}
+                </div>
+                <div className="text-sm text-slate-700 break-all">
+                  <span className="text-slate-400">直链：</span> {api.getFileUrl(singleSelected.fileId)}
+                </div>
 
                 {singleSelected.type?.startsWith('image/') && (
                   <div className="mt-2">
@@ -1957,19 +2039,34 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                 )}
 
                 <div className="flex flex-wrap gap-2 pt-2">
-                  <button className="px-3 py-2 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700" onClick={() => window.open(api.getFileUrl(singleSelected.fileId), '_blank')}>
+                  <button
+                    className="px-3 py-2 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                    onClick={() => window.open(api.getFileUrl(singleSelected.fileId), '_blank')}
+                  >
                     打开/下载
                   </button>
-                  <button className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200" onClick={() => copyText(api.getFileUrl(singleSelected.fileId), '直链已复制')}>
+                  <button
+                    className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200"
+                    onClick={() => copyText(api.getFileUrl(singleSelected.fileId), '直链已复制')}
+                  >
                     复制直链
                   </button>
-                  <button className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200" onClick={() => copyText(singleSelected.fileId, 'fileId 已复制')}>
+                  <button
+                    className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200"
+                    onClick={() => copyText(singleSelected.fileId, 'fileId 已复制')}
+                  >
                     复制 fileId
                   </button>
-                  <button className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200" onClick={() => copyText(singleSelected.name, '文件名已复制')}>
+                  <button
+                    className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200"
+                    onClick={() => copyText(singleSelected.name, '文件名已复制')}
+                  >
                     复制文件名
                   </button>
-                  <button className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200" onClick={() => copyText(singleSelected.key, '路径已复制')}>
+                  <button
+                    className="px-3 py-2 text-xs rounded-lg bg-slate-100 hover:bg-slate-200"
+                    onClick={() => copyText(singleSelected.key, '路径已复制')}
+                  >
                     复制路径
                   </button>
                 </div>
@@ -1981,8 +2078,14 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
       {/* ===== Delete Confirm ===== */}
       {deleteConfirm.isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isDeleting && setDeleteConfirm({ isOpen: false, targets: [] })}>
-          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-100" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm"
+          onClick={() => !isDeleting && setDeleteConfirm({ isOpen: false, targets: [] })}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-100 max-h-[90svh] overflow-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex flex-col items-center text-center gap-4">
               <div className="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center">
                 <AlertTriangle className="w-6 h-6 text-red-500" />
@@ -2014,48 +2117,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                   {isDeleting ? '删除中...' : '确认删除'}
                 </button>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ====== MoveTo Dialog（渲染在最外层，避免遮挡层级问题） ====== */}
-      {moveToOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isMoving && setMoveToOpen(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-4 border border-slate-100" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-2 py-2">
-              <div>
-                <div className="text-base font-bold text-slate-800">移动到...</div>
-                <div className="text-xs text-slate-500 mt-1">已选中 {selection.size} 项</div>
-              </div>
-              <button className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" onClick={() => !isMoving && setMoveToOpen(false)} title="关闭">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="h-[360px] border border-slate-100 rounded-xl overflow-hidden mx-2">
-              <FolderTree
-                shared={sharedTree}
-                currentFolderId={currentFolderId}
-                currentPath={currentPath}
-                mode="picker"
-                pickedFolderId={pickedTarget[pickedTarget.length - 1].folderId}
-                onPick={(fid, path, chain) => setPickedTarget(chain)}
-                enableDnD={false}
-              />
-            </div>
-
-            <div className="flex justify-end gap-2 px-2 pt-4">
-              <button className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl" onClick={() => !isMoving && setMoveToOpen(false)} disabled={isMoving}>
-                取消
-              </button>
-              <button
-                className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isMoving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
-                disabled={isMoving}
-                onClick={confirmMoveTo}
-              >
-                {isMoving ? '移动中...' : '确认移动'}
-              </button>
             </div>
           </div>
         </div>

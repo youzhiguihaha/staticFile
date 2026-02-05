@@ -1,3 +1,4 @@
+// src/components/FolderTree.tsx
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Folder, FolderOpen, ChevronRight, ChevronDown, Check, Loader2 } from 'lucide-react';
 import { api, FolderItem, MoveItem } from '../lib/api';
@@ -45,14 +46,19 @@ export function FolderTree({
   refreshNonce = 0,
   invalidateNonce = 0,
   invalidateFolderIds = [],
+
   currentFolderId,
   currentPath,
+
   onNavigate,
+
   onMove,
   enableDnD = true,
+
   mode = 'navigator',
   pickedFolderId,
   onPick,
+
   shared,
 }: Props) {
   const [childrenMapLocal, setChildrenMapLocal] = useState<Map<string, FolderItem[]>>(new Map());
@@ -71,6 +77,14 @@ export function FolderTree({
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
 
   const root: Node = useMemo(() => ({ folderId: 'root', name: '根目录', path: '' }), []);
+
+  // 触屏设备（粗指针）上 HTML5 DnD 兼容差，且会影响滚动体验
+  // 不改变桌面功能：桌面仍可拖拽；移动端仍可用“移动到/剪切粘贴”等功能移动
+  const isCoarsePointer = useMemo(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    return window.matchMedia('(pointer: coarse)').matches;
+  }, []);
+  const dndEnabled = !!enableDnD && !!onMove && !isCoarsePointer && mode === 'navigator';
 
   const setLoading = (folderId: string, on: boolean) => {
     setLoadingIds((prev) => {
@@ -164,12 +178,14 @@ export function FolderTree({
       return;
     }
 
-    await loadChildren(node);
+    // 体验优化：先展开再加载（不改变逻辑结果，只提升响应感）
     setExpanded((prev) => {
       const next = new Set(prev);
       next.add(fid);
       return next;
     });
+
+    loadChildren(node).catch(() => {});
   };
 
   const handleDrop = async (e: React.DragEvent, targetFolderId: string) => {
@@ -177,7 +193,7 @@ export function FolderTree({
     e.stopPropagation();
     setDragOverId(null);
 
-    if (!enableDnD || !onMove) return;
+    if (!dndEnabled || !onMove) return;
 
     const data = e.dataTransfer.getData('application/json');
     if (!data) return;
@@ -222,18 +238,21 @@ export function FolderTree({
       }
     };
 
+    // 缩进封顶：深层目录在手机上不会把文字挤没
+    const padLeft = Math.min(level, 6) * 16 + 12;
+
     return (
       <div key={node.folderId}>
         <div
-          className={`flex items-center gap-1.5 py-1 px-2 mx-1 rounded-md cursor-pointer transition-colors whitespace-nowrap
+          className={`flex items-center gap-1.5 py-2 px-2 mx-1 rounded-md cursor-pointer transition-colors min-w-0
             ${isActive ? 'bg-blue-100 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-200/50'}
             ${isPicked ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
             ${dragOverId === node.folderId ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
           `}
-          style={{ paddingLeft: `${level * 16 + 12}px` }}
+          style={{ paddingLeft: `${padLeft}px` }}
           onClick={handleClick}
           onDragOver={
-            enableDnD
+            dndEnabled
               ? (e) => {
                   e.preventDefault();
                   e.stopPropagation();
@@ -241,18 +260,20 @@ export function FolderTree({
                 }
               : undefined
           }
-          onDragLeave={enableDnD ? () => setDragOverId(null) : undefined}
-          onDrop={enableDnD ? (e) => handleDrop(e, node.folderId) : undefined}
+          onDragLeave={dndEnabled ? () => setDragOverId(null) : undefined}
+          onDrop={dndEnabled ? (e) => handleDrop(e, node.folderId) : undefined}
           title={node.name}
         >
-          <div
-            className={`p-0.5 rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-5 h-5 flex-shrink-0 ${
+          <button
+            type="button"
+            className={`rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-7 h-7 flex-shrink-0 ${
               !canExpand ? 'invisible' : ''
             }`}
             onClick={(e) => {
               e.stopPropagation();
               if (canExpand) toggle(node);
             }}
+            aria-label={isExpanded ? '收起' : '展开'}
           >
             {isLoading ? (
               <Loader2 className="w-3 h-3 text-slate-400 animate-spin" />
@@ -261,7 +282,7 @@ export function FolderTree({
             ) : (
               <ChevronRight className="w-3 h-3 text-slate-400" />
             )}
-          </div>
+          </button>
 
           {isActive || isExpanded ? (
             <FolderOpen className={`w-4 h-4 flex-shrink-0 ${isActive ? 'text-blue-500' : 'text-yellow-500'}`} />
@@ -269,9 +290,10 @@ export function FolderTree({
             <Folder className="w-4 h-4 text-yellow-500 flex-shrink-0" />
           )}
 
-          <span className="text-sm truncate select-none block max-w-[170px]">{node.name}</span>
+          {/* 名称占满剩余空间并可截断，避免横向滚动 */}
+          <span className="text-sm truncate select-none flex-1 min-w-0">{node.name}</span>
 
-          {mode === 'picker' && isPicked && <Check className="w-4 h-4 text-blue-600 ml-auto" />}
+          {mode === 'picker' && isPicked && <Check className="w-4 h-4 text-blue-600 ml-auto flex-shrink-0" />}
         </div>
 
         {isExpanded && kids.length > 0 && (
@@ -279,13 +301,7 @@ export function FolderTree({
             {kids
               .slice()
               .sort((a, b) => a.name.localeCompare(b.name))
-              .map((f) =>
-                renderNode(
-                  { folderId: f.folderId, name: f.name, path: f.key },
-                  level + 1,
-                  currentChain
-                )
-              )}
+              .map((f) => renderNode({ folderId: f.folderId, name: f.name, path: f.key }, level + 1, currentChain))}
           </div>
         )}
       </div>
@@ -293,8 +309,8 @@ export function FolderTree({
   };
 
   return (
-    <div className="w-full h-full overflow-auto select-none py-2 px-1 custom-scrollbar">
-      <div className="min-w-fit">{renderNode(root, 0, [])}</div>
+    <div className="w-full h-full overflow-y-auto overflow-x-hidden select-none py-2 px-1 custom-scrollbar">
+      <div className="w-full min-w-0">{renderNode(root, 0, [])}</div>
     </div>
   );
 }
