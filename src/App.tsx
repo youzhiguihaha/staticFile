@@ -1,40 +1,94 @@
 import { useState, useEffect } from 'react';
 import { Toaster } from 'react-hot-toast';
+import { Login } from './components/Login';
+import { FileExplorer } from './components/FileExplorer';
 import { api } from './lib/api';
-import FileExplorer from './components/FileExplorer';
+import { LogOut, RefreshCw } from 'lucide-react';
+import toast from 'react-hot-toast';
 
-export default function App() {
-  const [auth, setAuth] = useState(false);
-  const [boot, setBoot] = useState(true);
-  const [pwd, setPwd] = useState('');
+export function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [bootLoading, setBootLoading] = useState(true);
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   useEffect(() => {
-    setAuth(!!api.token);
-    setBoot(false);
+    const ok = api.checkAuth();
+    setIsAuthenticated(ok);
+    setBootLoading(false);
   }, []);
 
-  if (boot) return null;
+  const handleLogin = async (password: string) => {
+    const success = await api.login(password);
+    if (success) {
+      setIsAuthenticated(true);
+      setRefreshNonce((x) => x + 1);
+    }
+    return success;
+  };
 
-  if (!auth) {
+  const handleRefresh = () => {
+    if (!api.checkAuth()) {
+      toast.error('登录已过期，请重新登录');
+      setIsAuthenticated(false);
+      return;
+    }
+    setRefreshNonce((x) => x + 1);
+  };
+
+  if (bootLoading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-slate-50">
-        <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm border border-slate-100">
-          <h1 className="text-2xl font-bold mb-2 text-center text-slate-800">CloudDrive</h1>
-          <p className="text-center text-slate-400 text-sm mb-8">请输入管理员密码</p>
-          <form onSubmit={async e => { e.preventDefault(); if(await api.login(pwd)) setAuth(true); else alert('密码错误'); }}>
-            <input type="password" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Password" value={pwd} onChange={e => setPwd(e.target.value)} />
-            <button className="w-full bg-blue-600 text-white p-3 rounded-xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200">登录</button>
-          </form>
-        </div>
-        <Toaster />
-      </div>
+      <>
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center text-slate-500">Loading...</div>
+        <Toaster position="bottom-right" />
+      </>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <>
+        <Login onLogin={handleLogin} />
+        <Toaster position="bottom-right" />
+      </>
     );
   }
 
   return (
-    <>
-      <FileExplorer />
-      <Toaster position="bottom-center" toastOptions={{ className: 'font-medium shadow-xl' }} />
-    </>
+    <div className="min-h-screen bg-gray-50 flex flex-col">
+      <header className="bg-white shadow-sm sticky top-0 z-20">
+        <div className="mx-auto max-w-7xl px-4 py-3 sm:px-6 lg:px-8 flex justify-between items-center">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+              <span className="text-white font-bold text-lg">C</span>
+            </div>
+            <h1 className="text-lg font-bold text-gray-800 hidden sm:block">CloudDrive</h1>
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <button onClick={handleRefresh} className="p-2 text-gray-500 hover:text-blue-600 rounded-lg hover:bg-gray-100 transition-colors" title="刷新">
+              <RefreshCw className="h-5 w-5" />
+            </button>
+
+            <button
+              onClick={() => {
+                api.logout();
+                setIsAuthenticated(false);
+              }}
+              className="flex items-center gap-2 text-sm text-gray-600 hover:text-red-600 font-medium px-3 py-2 rounded-lg hover:bg-red-50 transition-colors"
+              title="退出"
+            >
+              <LogOut className="h-4 w-4" />
+              <span className="hidden sm:inline">退出</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1 mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 w-full">
+        <FileExplorer refreshNonce={refreshNonce} />
+      </main>
+
+      <Toaster position="bottom-right" />
+    </div>
   );
 }
