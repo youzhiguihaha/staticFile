@@ -62,7 +62,7 @@ function formatTimeShort(ts?: number) {
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-// ====== 缩略图：只有进入视口才设置 src ======
+// ====== 懒加载图片缩略图 ======
 function LazyImg({ src, alt, className }: { src: string; alt?: string; className?: string }) {
   const ref = useRef<HTMLImageElement | null>(null);
   const [ready, setReady] = useState(false);
@@ -184,7 +184,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
     setLastSelectedKey(null);
   };
 
-  // 文件夹 meta：你确认 size 永远为 0，所以不展示数量，避免误导
+  // 文件夹 meta（size=0，不展示数量避免误导）
   const folderMetaText = (f: FolderItem) => {
     const t = f.uploadedAt ? formatTimeShort(f.uploadedAt) : '';
     return t ? `文件夹 · ${t}` : '文件夹';
@@ -429,7 +429,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
     return kind === 'folder' ? `${currentPath}${n}/` : `${currentPath}${n}`;
   };
 
-  // ===== 视图/排序：文件夹永远在前；time/size 时文件夹也参与排序（size=0 时用 name 做 tie-break）=====
+  // ===== 视图/排序：文件夹永远在前；size=0 时用 name 做稳定 tie-break =====
   const sortedItems = useMemo(() => {
     let list = items;
 
@@ -781,7 +781,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
       const fromIds = Array.from(new Set(filtered.map((x) => x.fromFolderId)));
       invalidateTree([target.folderId, ...fromIds]);
 
-      // 从当前目录移走：本地移除
       const keysToRemove: string[] = filtered.map((m) => keyFromNameKind(m.name, m.kind));
       removeKeysFromItems(keysToRemove);
       clearSelection();
@@ -890,7 +889,36 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
     }
   };
 
-  // drag start
+  // click/select（原逻辑保留）
+  const handleItemClick = (e: React.MouseEvent, item: ExplorerItem) => {
+    e.stopPropagation();
+
+    if (isMultiSelectMode || e.ctrlKey || e.metaKey) {
+      const ns = new Set(selection);
+      ns.has(item.key) ? ns.delete(item.key) : ns.add(item.key);
+      setSelection(ns);
+      setLastSelectedKey(item.key);
+      return;
+    }
+
+    if (e.shiftKey && lastSelectedKey) {
+      const idx1 = sortedItems.findIndex((i) => i.key === lastSelectedKey);
+      const idx2 = sortedItems.findIndex((i) => i.key === item.key);
+      if (idx1 !== -1 && idx2 !== -1) {
+        const range = sortedItems.slice(Math.min(idx1, idx2), Math.max(idx1, idx2) + 1);
+        setSelection(new Set(range.map((i) => i.key)));
+      }
+      return;
+    }
+
+    if (isFolder(item)) enterFolder(item);
+    else {
+      setSelection(new Set([item.key]));
+      setLastSelectedKey(item.key);
+    }
+  };
+
+  // drag start（原逻辑保留）
   const handleDragStart = (e: React.DragEvent, item: ExplorerItem) => {
     const keys = selection.has(item.key) ? Array.from(selection) : [item.key];
     const moveItems: MoveItem[] = [];
@@ -943,7 +971,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
       const fromIds = Array.from(new Set(filtered.map((x) => x.fromFolderId)));
       invalidateTree([target.folderId, ...fromIds]);
 
-      // 从当前目录移走：本地移除
       const keysToRemove = filtered
         .filter((m) => m.fromFolderId === currentFolderId)
         .map((m) => keyFromNameKind(m.name, m.kind));
@@ -977,7 +1004,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
       const fromIds = Array.from(new Set(filtered.map((x) => x.fromFolderId)));
       invalidateTree([targetFolderId, ...fromIds]);
 
-      // 如果源目录是当前目录：移除本地
       const keysToRemove = filtered
         .filter((m) => m.fromFolderId === currentFolderId)
         .map((m) => keyFromNameKind(m.name, m.kind));
@@ -986,7 +1012,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         clearSelection();
       }
 
-      // 如果目标目录是当前目录：合并 targetAdded（尽量不 list）
       if (targetFolderId === currentFolderId && res?.targetAdded) {
         const addedFiles: FileItem[] = (res.targetAdded.files || []).map((u) => ({
           key: `${currentPath}${u.name}`,
@@ -1020,7 +1045,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
     }
   };
 
-  // keyboard
+  // keyboard（原逻辑保留）
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (['input', 'textarea'].includes(document.activeElement?.tagName.toLowerCase() || '')) return;
@@ -1051,9 +1076,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         }
       }
 
-      if (e.key.toLowerCase() === 'i' && selection.size === 1) {
-        setInfoOpen(true);
-      }
+      if (e.key.toLowerCase() === 'i' && selection.size === 1) setInfoOpen(true);
       if (e.key === 'F2' && selection.size === 1) {
         const it = singleSelected;
         if (it) openRename(it);
@@ -1123,16 +1146,22 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
       <div
         className="flex-1 flex flex-col min-w-0 bg-white"
         onContextMenu={openContextMenuBlank}
-        onClick={() => !isMultiSelectMode && clearSelection()}
+        onClick={(e) => {
+          // ✅ 修复“点 item 立刻被清空导致看起来点不动”
+          // 只在点击空白区域时清空（不改变原交互意图）
+          if (e.target !== e.currentTarget) return;
+          if (!isMultiSelectMode) clearSelection();
+        }}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
           if (e.dataTransfer.files?.length) handleUpload(Array.from(e.dataTransfer.files));
         }}
       >
-        {/* Top bar：恢复你原来按钮，只做适配（横向滚动/不溢出） */}
+        {/* Top bar：菜单按钮 + 面包屑 + 原完整操作按钮（手机端可横向滚动） */}
         <div className="px-4 py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20">
           <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0">
+            {/* ✅ 手机目录按钮恢复 */}
             <button
               className="sm:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full"
               onClick={() => setShowSidebar(true)}
@@ -1155,7 +1184,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
               <ArrowLeft className="w-5 h-5" />
             </button>
 
-            {/* Breadcrumb：移动端可横向滚动 */}
             <div className="flex items-center gap-1 text-sm min-w-0 overflow-x-auto whitespace-nowrap [scrollbar-width:none] [-ms-overflow-style:none]">
               {crumbs.map((c, idx) => {
                 const active = idx === crumbs.length - 1;
@@ -1189,7 +1217,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
             {loading && <span className="text-xs text-slate-400 ml-2 whitespace-nowrap">加载中...</span>}
           </div>
 
-          {/* Actions：桌面/手机都保留所有按钮；手机端横向滚动防溢出 */}
+          {/* ✅ 原来的按钮全部保留：手机端横向滚动防挤爆 */}
           <div className="max-w-full overflow-x-auto sm:overflow-visible [scrollbar-width:none] [-ms-overflow-style:none]">
             <div className="flex items-center gap-2 whitespace-nowrap">
               {selection.size > 0 ? (
@@ -1361,7 +1389,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     </button>
                   </div>
 
-                  {/* 桌面端：搜索在顶栏；移动端：下面单独一条 */}
                   <div className="relative group hidden md:block">
                     <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
@@ -1428,7 +1455,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
           </div>
         </div>
 
-        {/* 移动端搜索条：不删任何按钮，只补更好用入口 */}
+        {/* 移动端搜索条 */}
         <div className="px-4 pb-3 border-b border-slate-100 bg-white md:hidden">
           <div className="relative">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -1490,10 +1517,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         {loadError && (
           <div className="px-4 py-2 border-b border-slate-100 bg-red-50 text-red-700 text-sm flex items-center justify-between gap-2">
             <span className="truncate">加载失败：{loadError}</span>
-            <button
-              className="px-3 py-1 rounded bg-white border border-red-200 hover:bg-red-100 flex-shrink-0"
-              onClick={() => load(currentFolderId, currentPath, { bypassCache: true })}
-            >
+            <button className="px-3 py-1 rounded bg-white border border-red-200 hover:bg-red-100 flex-shrink-0" onClick={() => load(currentFolderId, currentPath, { bypassCache: true })}>
               重试
             </button>
           </div>
@@ -1543,8 +1567,9 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     const isFlashing = flashKeys.has(item.key);
                     const isDraggingOver = dragOverFolderKey === item.key;
 
-                    const fileThumb =
-                      !isFolder(item) && item.type?.startsWith('image/') ? api.getFileUrl((item as FileItem).fileId) : '';
+                    const fileThumb = !isFolder(item) && item.type?.startsWith('image/')
+                      ? api.getFileUrl((item as FileItem).fileId)
+                      : '';
 
                     const metaText = isFolder(item)
                       ? folderMetaText(item as FolderItem)
@@ -1581,7 +1606,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                           }`}
                         title={item.key}
                       >
-                        {/* ⋯更多按钮 */}
                         <button
                           className="absolute top-2 left-2 z-30 p-1.5 rounded-lg border border-slate-200 bg-white/85 text-slate-600 hover:bg-white transition
                                      opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
@@ -1601,7 +1625,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                           </div>
                         )}
 
-                        {/* 拖拽提示 */}
                         {isFolder(item) && isDraggingOver && (
                           <div className="absolute inset-0 rounded-xl bg-blue-500/10 ring-2 ring-blue-400 flex items-center justify-center pointer-events-none">
                             <div className="text-xs font-semibold text-blue-700 bg-white/80 border border-blue-200 px-2 py-1 rounded-lg">
@@ -1675,7 +1698,6 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                           )}
                           <div className="min-w-0 flex-1">
                             <div className="truncate">{item.name}</div>
-                            {/* 手机端补一行 meta（不影响逻辑，提升体验） */}
                             <div className="sm:hidden text-[11px] text-slate-400 truncate mt-0.5">
                               {isFolder(item)
                                 ? folderMetaText(item as FolderItem)
@@ -1704,7 +1726,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
           )}
         </div>
 
-        {/* ===== 右键菜单（⋯按钮复用它） ===== */}
+        {/* ===== 右键菜单 ===== */}
         {contextMenu.visible && (
           <div
             className="fixed z-50 bg-white/95 backdrop-blur rounded-lg shadow-xl border border-slate-100 w-52 py-1 overflow-auto max-h-[70svh]"
@@ -1826,14 +1848,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
         {/* ===== MoveTo Dialog（只渲染一次）===== */}
         {moveToOpen && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm pb-[env(safe-area-inset-bottom,0px)]"
-            onClick={() => !isMoving && setMoveToOpen(false)}
-          >
-            <div
-              className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-4 border border-slate-100 max-h-[90svh] overflow-auto"
-              onClick={(e) => e.stopPropagation()}
-            >
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isMoving && setMoveToOpen(false)}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-4 border border-slate-100 max-h-[90svh] overflow-auto" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between px-2 py-2">
                 <div>
                   <div className="text-base font-bold text-slate-800">移动到...</div>
@@ -1856,15 +1872,11 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                 />
               </div>
 
-              <div className="flex justify-end gap-2 px-2 pt-4 pb-[env(safe-area-inset-bottom,0px)]">
+              <div className="flex justify-end gap-2 px-2 pt-4">
                 <button className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl" onClick={() => !isMoving && setMoveToOpen(false)} disabled={isMoving}>
                   取消
                 </button>
-                <button
-                  className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isMoving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
-                  disabled={isMoving}
-                  onClick={confirmMoveTo}
-                >
+                <button className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isMoving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`} disabled={isMoving} onClick={confirmMoveTo}>
                   {isMoving ? '移动中...' : '确认移动'}
                 </button>
               </div>
@@ -1874,14 +1886,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
         {/* ===== Rename Dialog ===== */}
         {renameDialog.open && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm pb-[env(safe-area-inset-bottom,0px)]"
-            onClick={() => !isRenaming && setRenameDialog((p) => ({ ...p, open: false }))}
-          >
-            <div
-              className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 border border-slate-100 max-h-[90svh] overflow-auto"
-              onClick={(e) => e.stopPropagation()}
-            >
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isRenaming && setRenameDialog((p) => ({ ...p, open: false }))}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 border border-slate-100 max-h-[90svh] overflow-auto" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between">
                 <div className="text-base font-bold text-slate-800">重命名</div>
                 <button className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" onClick={() => !isRenaming && setRenameDialog((p) => ({ ...p, open: false }))}>
@@ -1904,15 +1910,11 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                 />
               </div>
 
-              <div className="flex justify-end gap-2 mt-4 pb-[env(safe-area-inset-bottom,0px)]">
+              <div className="flex justify-end gap-2 mt-4">
                 <button className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl" disabled={isRenaming} onClick={() => setRenameDialog((p) => ({ ...p, open: false }))}>
                   取消
                 </button>
-                <button
-                  className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isRenaming ? 'bg-blue-300' : 'bg-blue-600 hover:bg-blue-700'}`}
-                  disabled={isRenaming}
-                  onClick={confirmRename}
-                >
+                <button className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isRenaming ? 'bg-blue-300' : 'bg-blue-600 hover:bg-blue-700'}`} disabled={isRenaming} onClick={confirmRename}>
                   {isRenaming ? '处理中...' : '确认'}
                 </button>
               </div>
@@ -1923,10 +1925,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         {/* ===== Info Drawer ===== */}
         {infoOpen && (
           <div className="fixed inset-0 z-50 flex justify-end bg-black/20" onClick={() => setInfoOpen(false)}>
-            <div
-              className="w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 p-4 overflow-auto overscroll-contain pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
-              onClick={(e) => e.stopPropagation()}
-            >
+            <div className="w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 p-4 overflow-auto" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between">
                 <div className="text-lg font-bold text-slate-800">详情</div>
                 <button className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" onClick={() => setInfoOpen(false)} title="关闭">
@@ -2001,10 +2000,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
         {/* ===== Delete Confirm ===== */}
         {deleteConfirm.isOpen && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm pb-[env(safe-area-inset-bottom,0px)]"
-            onClick={() => !isDeleting && setDeleteConfirm({ isOpen: false, targets: [] })}
-          >
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isDeleting && setDeleteConfirm({ isOpen: false, targets: [] })}>
             <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-100 max-h-[90svh] overflow-auto" onClick={(e) => e.stopPropagation()}>
               <div className="flex flex-col items-center text-center gap-4">
                 <div className="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center">
@@ -2017,7 +2013,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     <span className="text-red-500 font-medium">此操作不可恢复。</span>
                   </p>
                 </div>
-                <div className="grid grid-cols-2 gap-3 w-full mt-2 pb-[env(safe-area-inset-bottom,0px)]">
+                <div className="grid grid-cols-2 gap-3 w-full mt-2">
                   <button
                     onClick={() => setDeleteConfirm({ isOpen: false, targets: [] })}
                     disabled={isDeleting}
