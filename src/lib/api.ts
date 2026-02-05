@@ -1,8 +1,9 @@
 // src/lib/api.ts
 
+// 定义数据类型，与后端保持一致
 export interface FolderItem {
-  key: string;
-  folderId: string;
+  key: string;      // 用于 UI 列表的唯一 Key (path + name)
+  folderId: string; // KV 中的真实 ID
   name: string;
   type: 'folder';
   size: 0;
@@ -12,7 +13,7 @@ export interface FolderItem {
 
 export interface FileItem {
   key: string;
-  fileId: string;
+  fileId: string;   // 下载用的真实 ID
   name: string;
   type: string;
   size: number;
@@ -21,11 +22,12 @@ export interface FileItem {
 
 export type ExplorerItem = FolderItem | FileItem;
 
-export type MoveItem =
+// 移动/删除操作的数据结构
+export type MoveItem = 
   | { kind: 'file'; fromFolderId: string; name: string }
   | { kind: 'folder'; fromFolderId: string; folderId: string; name: string };
 
-export type DeleteItem =
+export type DeleteItem = 
   | { kind: 'file'; fromFolderId: string; name: string; fileId: string }
   | { kind: 'folder'; fromFolderId: string; name: string; folderId: string };
 
@@ -41,13 +43,14 @@ export interface ListResponse {
 
 const TOKEN_KEY = 'auth_token';
 const LOGIN_TIME_KEY = 'login_timestamp';
-const TIMEOUT_MS = 12 * 60 * 60 * 1000;
+const TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12小时超时
 
 export const api = {
+  // 检查本地登录状态 (不请求服务器，极致省流)
   checkAuth() {
-    const timeStr = localStorage.getItem(LOGIN_TIME_KEY);
-    if (!timeStr) return false;
-    if (Date.now() - parseInt(timeStr) > TIMEOUT_MS) {
+    const t = localStorage.getItem(LOGIN_TIME_KEY);
+    if (!t) return false;
+    if (Date.now() - parseInt(t) > TIMEOUT_MS) {
       this.logout();
       return false;
     }
@@ -62,15 +65,30 @@ export const api = {
     window.location.reload();
   },
 
+  // 通用请求封装
+  async request(path: string, opts: RequestInit = {}) {
+    if (!this.checkAuth() && !path.includes('/login')) throw new Error('登录已过期');
+    
+    const headers = {
+      'Authorization': `Bearer ${this.getToken()}`,
+      ...opts.headers
+    };
+
+    const res = await fetch(path, { ...opts, headers });
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(txt || '请求失败');
+    }
+    return res.json();
+  },
+
   async login(password: string): Promise<boolean> {
     try {
-      const res = await fetch('/api/login', {
+      const data = await this.request('/api/login', {
         method: 'POST',
         body: JSON.stringify({ password }),
         headers: { 'Content-Type': 'application/json' },
       });
-      if (!res.ok) return false;
-      const data = await res.json();
       localStorage.setItem(TOKEN_KEY, data.token);
       localStorage.setItem(LOGIN_TIME_KEY, Date.now().toString());
       return true;
@@ -79,90 +97,66 @@ export const api = {
     }
   },
 
-  async list(folderId: string, path: string): Promise<ListResponse> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
-    const qs = new URLSearchParams({ fid: folderId, path }).toString();
-    const res = await fetch(`/api/list?${qs}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) throw new Error(await res.text());
-    return await res.json();
+  // 获取文件列表
+  // bustCache: 当刚进行完上传/删除操作时设为 true，强制加上时间戳参数，绕过浏览器的强缓存
+  async list(folderId: string, path: string, bustCache = false): Promise<ListResponse> {
+    const params = new URLSearchParams({ fid: folderId, path });
+    if (bustCache) params.append('_t', Date.now().toString());
+    return this.request(`/api/list?${params.toString()}`);
   },
 
-  async createFolder(parentId: string, name: string): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
-    const res = await fetch('/api/create-folder', {
+  async createFolder(parentId: string, name: string) {
+    return this.request('/api/create-folder', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ parentId, name }),
+      headers: { 'Content-Type': 'application/json' },
     });
-    if (!res.ok) throw new Error(await res.text());
   },
 
-  async upload(files: File[], folderId: string): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
+  async upload(files: File[], folderId: string) {
     const form = new FormData();
-
-    for (const f of files) {
+    // 简单净化文件名，防止 URL 编码问题
+    files.forEach(f => {
       const safeName = f.name.replace(/[\/|]/g, '_');
-      const safeFile = new File([f], safeName, { type: f.type });
-      form.append('file', safeFile);
-    }
+      form.append('file', f, safeName);
+    });
     form.append('folderId', folderId);
-
-    const res = await fetch('/api/upload', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: form,
-    });
-    if (!res.ok) throw new Error(await res.text());
+    return this.request('/api/upload', { method: 'POST', body: form });
   },
 
-  async move(items: MoveItem[], targetFolderId: string): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
-    const res = await fetch('/api/move', {
+  async move(items: MoveItem[], targetFolderId: string) {
+    return this.request('/api/move', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ items, targetFolderId }),
+      headers: { 'Content-Type': 'application/json' },
     });
-    if (!res.ok) throw new Error(await res.text());
   },
 
-  async batchDelete(items: DeleteItem[]): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
-    const res = await fetch('/api/batch-delete', {
+  async batchDelete(items: DeleteItem[]) {
+    return this.request('/api/batch-delete', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ items }),
+      headers: { 'Content-Type': 'application/json' },
     });
-    if (!res.ok) throw new Error(await res.text());
   },
 
-  async renameFile(folderId: string, oldName: string, newName: string): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
-    const res = await fetch('/api/rename-file', {
+  async renameFile(folderId: string, oldName: string, newName: string) {
+    return this.request('/api/rename-file', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ folderId, oldName, newName }),
+      headers: { 'Content-Type': 'application/json' },
     });
-    if (!res.ok) throw new Error(await res.text());
   },
 
-  async renameFolder(parentId: string, folderId: string, oldName: string, newName: string): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
-    const res = await fetch('/api/rename-folder', {
+  async renameFolder(parentId: string, folderId: string, oldName: string, newName: string) {
+    return this.request('/api/rename-folder', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ parentId, folderId, oldName, newName }),
+      headers: { 'Content-Type': 'application/json' },
     });
-    if (!res.ok) throw new Error(await res.text());
   },
 
+  // 生成下载直链
   getFileUrl(fileId: string) {
     if (!fileId) return '';
     return `${window.location.origin}/file/${encodeURIComponent(fileId)}`;
