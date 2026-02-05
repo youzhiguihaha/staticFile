@@ -1,4 +1,3 @@
-// src/components/FolderTree.tsx
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Folder, FolderOpen, ChevronRight, ChevronDown, Check } from 'lucide-react';
 import { api, FolderItem, MoveItem } from '../lib/api';
@@ -17,37 +16,33 @@ export type SharedTreeState = {
 type Mode = 'navigator' | 'picker';
 
 interface Props {
-  // 全量刷新树（清空缓存）
   refreshNonce?: number;
-
-  // 精准失效：只删除这些 folderId 的缓存（更省 read）
   invalidateNonce?: number;
   invalidateFolderIds?: string[];
 
-  // 当前激活目录（用于高亮）
   currentFolderId: string;
   currentPath: string;
 
-  // navigator 模式：点击后导航（返回完整面包屑链）
+  // navigator 模式：点击导航（返回完整 crumbs 链）
   onNavigate?: (folderId: string, path: string, chain: Crumb[]) => void;
 
-  // 拖拽移动：把 moveItems 移到 targetFolderId
+  // 拖拽移动
   onMove?: (items: MoveItem[], targetFolderId: string) => void;
   enableDnD?: boolean;
 
-  // picker 模式：点击后选择目标目录（返回完整面包屑链）
+  // picker 模式：点击选择目标目录
   mode?: Mode;
   pickedFolderId?: string;
   onPick?: (folderId: string, path: string, chain: Crumb[]) => void;
 
-  // 共享缓存（侧边树 + “移动到…”对话框复用，最省 read）
+  // 共享缓存（侧边树 + 移动对话框共用，省 read）
   shared?: SharedTreeState;
 }
 
 interface Node {
   folderId: string;
   name: string;
-  path: string; // 仅用于 UI 生成 key，不用于后端寻址
+  path: string; // UI path，用于生成 crumbs；不参与后端寻址
 }
 
 export function FolderTree({
@@ -64,7 +59,7 @@ export function FolderTree({
   onPick,
   shared,
 }: Props) {
-  // 本地缓存（如果没传 shared 就用本地）
+  // local fallback if shared not provided
   const [childrenMapLocal, setChildrenMapLocal] = useState<Map<string, FolderItem[]>>(new Map());
   const [expandedLocal, setExpandedLocal] = useState<Set<string>>(new Set());
   const nodeInfoRefLocal = useRef<Map<string, Node>>(new Map());
@@ -93,7 +88,7 @@ export function FolderTree({
     }
   };
 
-  // 全量刷新：清缓存
+  // 全量刷新：清缓存（更省心，但读会多一点）
   useEffect(() => {
     setChildrenMap(new Map());
     setExpanded(new Set());
@@ -107,7 +102,7 @@ export function FolderTree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 精准失效：删掉指定 folderId 的缓存；如果该节点已展开，则强制重载一次（读很便宜）
+  // 精准失效：只删指定 folderId 的缓存；若已展开则强制重载一次（读便宜）
   useEffect(() => {
     if (!invalidateFolderIds.length) return;
 
@@ -177,7 +172,7 @@ export function FolderTree({
     const handleClick = () => {
       if (mode === 'picker') {
         onPick?.(node.folderId, node.path, currentChain);
-        // picker 模式点击也顺便展开一下（体验更好，不增加 KV 写）
+        // picker 模式点击也可自动展开（更人性化，不增加 KV 写）
         if (hasChildren && !isExpanded) toggle(node);
       } else {
         onNavigate?.(node.folderId, node.path, currentChain);
@@ -217,11 +212,7 @@ export function FolderTree({
               toggle(node);
             }}
           >
-            {isExpanded ? (
-              <ChevronDown className="w-3 h-3 text-slate-500" />
-            ) : (
-              <ChevronRight className="w-3 h-3 text-slate-400" />
-            )}
+            {isExpanded ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
           </div>
 
           {isActive || isExpanded ? (

@@ -44,10 +44,11 @@ const MIN_PBKDF2_ITER = 10000;
 // KV value 最大 25MiB（保守一点：24MiB）
 const MAX_FILE_BYTES = 24 * 1024 * 1024;
 
+// /file 资源不可变：一年缓存（适合随机 fileId 永不复用模型）
+const FILE_CACHE_SECONDS = 31536000; // 1 year
+
 // ======= in-memory caches (reduce KV reads) =======
 let _rootEnsured = false;
-
-// dir shard 短缓存：减少重复 get（只省 reads，不影响 write/delete/list）
 const DIR_CACHE_TTL_MS = 5000;
 const _dirCache = new Map(); // folderId -> { ts, dirObj }
 
@@ -153,7 +154,6 @@ async function verifyPassword(env, passwordInput) {
   const hashHex = (env.PASSWORD_HASH_HEX || '').trim().toLowerCase();
   const saltHex = (env.PASSWORD_SALT_HEX || '').trim().toLowerCase();
 
-  // PBKDF2 强哈希模式
   if (hashHex && saltHex) {
     const salt = hexToBytes(saltHex);
     if (!salt) return false;
@@ -162,7 +162,6 @@ async function verifyPassword(env, passwordInput) {
     return constantTimeEqualHex(derived, hashHex);
   }
 
-  // 明文兼容（不推荐）
   const plain = (env.PASSWORD_PLAIN || env.PASSWORD || '').toString();
   return passwordInput === plain;
 }
@@ -273,6 +272,14 @@ async function isDescendant(env, maybeChildId, maybeAncestorId, limit = 64) {
   return false;
 }
 
+// ======= fileId：UUID(128-bit)（极致省 KV：不做 KV.get 检测） =======
+function makeFileId(extWithDot) {
+  // crypto.randomUUID() 在 Cloudflare Workers 可用
+  // 去掉 '-'，让 fileId 更短、更 URL 友好
+  const base = crypto.randomUUID().replace(/-/g, '');
+  return `${base}${extWithDot || ''}`;
+}
+
 // ======= Router =======
 export default {
   async fetch(request, env) {
@@ -356,23 +363,94 @@ async function handleApi(request, env) {
     folders.sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
     files.sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
 
-    return new Response(JSON.stringify({
-      success: true,
-      folderId: dir.id,
-      parentId: dir.parentId,
-      path,
-      updatedAt: dir.updatedAt || 0,
-      folders,
-      files,
-    }), {
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-        'Pragma': 'no-cache',
-        'Expires': '0',
-        ...BASE_CORS
+    return new Response(
+      JSON.stringify({
+        success: true,
+        folderId: dir.id,
+        parentId: dir.parentId,
+        path,
+        updatedAt: dir.updatedAt || 0,
+        folders,
+        files,
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Pragma': 'no-cache',
+          'Expires': '0',
+          ...BASE_CORS,
+        },
       }
-    });
+    );
+  }
+
+  // ===== rename file (dir-only) =====
+  if (url.pathname === '/api/rename-file') {
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const body = await request.json().catch(() => null);
+    const folderId = (body?.folderId || '').trim() || ROOT_ID;
+    const oldName = cleanName(body?.oldName || '');
+    let newName = cleanName(body?.newName || '');
+
+    if (!oldName || !newName) return new Response('Invalid name', { status: 400, headers: BASE_CORS });
+    if (oldName === newName) {
+      return new Response(JSON.stringify({ success: true, noop: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
+    }
+
+    const dir = await getDir(env, folderId);
+    if (!dir) return new Response('Folder not found', { status: 404, headers: BASE_CORS });
+
+    dir.files = dir.files || {};
+    const meta = dir.files[oldName];
+    if (!meta) return new Response('File not found', { status: 404, headers: BASE_CORS });
+
+    newName = ensureUniqueName(dir.files, newName);
+
+    delete dir.files[oldName];
+    dir.files[newName] = meta;
+
+    await putDir(env, dir);
+    return new Response(JSON.stringify({ success: true, newName }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
+  }
+
+  // ===== rename folder (parent dir + child dir only) =====
+  if (url.pathname === '/api/rename-folder') {
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const body = await request.json().catch(() => null);
+    const parentId = (body?.parentId || '').trim() || ROOT_ID;
+    const folderId = (body?.folderId || '').trim();
+    const oldName = cleanName(body?.oldName || '');
+    let newName = cleanName(body?.newName || '');
+
+    if (!folderId || !oldName || !newName) return new Response('Invalid name', { status: 400, headers: BASE_CORS });
+    if (oldName === newName) {
+      return new Response(JSON.stringify({ success: true, noop: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
+    }
+
+    const parent = await getDir(env, parentId);
+    if (!parent) return new Response('Parent not found', { status: 404, headers: BASE_CORS });
+
+    parent.folders = parent.folders || {};
+    if (parent.folders[oldName] !== folderId) return new Response('Folder mapping not found', { status: 404, headers: BASE_CORS });
+
+    newName = ensureUniqueName(parent.folders, newName);
+
+    delete parent.folders[oldName];
+    parent.folders[newName] = folderId;
+
+    const child = await getDir(env, folderId);
+    if (child) {
+      child.name = newName;
+      child.parentId = parentId;
+      await putDir(env, child);
+    }
+
+    await putDir(env, parent);
+
+    return new Response(JSON.stringify({ success: true, newName }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
   }
 
   // ===== create folder =====
@@ -407,7 +485,7 @@ async function handleApi(request, env) {
     });
   }
 
-  // ===== upload =====
+  // ===== upload (UUID fileId，无检测，极致省 KV read) =====
   if (url.pathname === '/api/upload') {
     if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
 
@@ -436,7 +514,8 @@ async function handleApi(request, env) {
         const i = name.lastIndexOf('.');
         return i > 0 ? name.slice(i) : '';
       })();
-      const fileId = `${shortId(12)}${ext}`;
+
+      const fileId = makeFileId(ext);
 
       await env.MY_BUCKET.put(binKey(fileId), file.stream(), {
         metadata: { type: file.type || '', size: file.size || 0, name }
@@ -472,7 +551,6 @@ async function handleApi(request, env) {
     targetDir.folders = targetDir.folders || {};
     targetDir.files = targetDir.files || {};
 
-    // fromFolderId 分组：每个源目录只读/写一次；同目录 move 忽略
     const group = new Map();
     for (const it of items) {
       const fromId = (it?.fromFolderId || '').trim();
@@ -483,12 +561,9 @@ async function handleApi(request, env) {
       if (it.kind === 'folder') group.get(fromId).folders.push(it);
     }
     if (group.size === 0) {
-      return new Response(JSON.stringify({ success: true, noop: true }), {
-        headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-      });
+      return new Response(JSON.stringify({ success: true, noop: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
     }
 
-    // 防止文件夹移动进自己/子孙
     for (const g of group.values()) {
       for (const fd of g.folders) {
         const folderId = (fd.folderId || '').trim();
@@ -514,7 +589,6 @@ async function handleApi(request, env) {
     for (const [fromId, g] of group.entries()) {
       const src = sourceDirs.get(fromId);
 
-      // files
       for (const f of g.files) {
         let name = cleanName(f?.name || '');
         if (!name) continue;
@@ -528,7 +602,6 @@ async function handleApi(request, env) {
         targetDirty = true;
       }
 
-      // folders
       for (const fd of g.folders) {
         let name = cleanName(fd?.name || '');
         const folderId = (fd?.folderId || '').trim();
@@ -541,7 +614,6 @@ async function handleApi(request, env) {
         dirty.set(fromId, true);
         targetDirty = true;
 
-        // 更新被移动目录 parentId/name（必要写）
         const moved = await getDir(env, folderId);
         if (moved) {
           moved.parentId = targetFolderId;
@@ -556,9 +628,7 @@ async function handleApi(request, env) {
     }
     if (targetDirty) await putDir(env, targetDir);
 
-    return new Response(JSON.stringify({ success: true }), {
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-    });
+    return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
   }
 
   // ===== batch-delete =====
@@ -615,7 +685,6 @@ async function handleApi(request, env) {
     for (const [fromId, g] of group.entries()) {
       const src = sourceDirs.get(fromId);
 
-      // files
       for (const f of g.files) {
         const name = cleanName(f?.name || '');
         const fileId = (f?.fileId || '').trim();
@@ -631,7 +700,6 @@ async function handleApi(request, env) {
         }
       }
 
-      // folders
       for (const fd of g.folders) {
         const name = cleanName(fd?.name || '');
         const folderId = (fd?.folderId || '').trim();
@@ -662,16 +730,13 @@ async function handleApi(request, env) {
     const uniqDirFolderIds = Array.from(new Set(dirToDeleteFolderIds));
     for (const folderId of uniqDirFolderIds) await deleteDir(env, folderId);
 
-    return new Response(JSON.stringify({ success: true }), {
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
-    });
+    return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
   }
 
   return new Response('Not Found', { status: 404, headers: BASE_CORS });
 }
 
-// ======= /file with edge cache (caches.default) =======
-// 热门直链重复访问：命中 edge cache => 0 KV read
+// ======= /file with edge cache + immutable 1y =======
 async function handleFile(request, env) {
   try {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -683,33 +748,27 @@ async function handleFile(request, env) {
     const fileId = decodeURIComponent(url.pathname.slice('/file/'.length) || '');
     if (!fileId || fileId.length < 5) return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
 
-    // cacheKey 去掉 query，避免缓存碎片
     const cacheKey = new Request(url.origin + url.pathname, { method: 'GET' });
     const cache = caches.default;
 
-    // 1) 先查 edge cache
     const cached = await cache.match(cacheKey);
     if (cached) {
-      if (request.method === 'HEAD') {
-        return new Response(null, { status: cached.status, headers: new Headers(cached.headers) });
-      }
+      if (request.method === 'HEAD') return new Response(null, { status: cached.status, headers: new Headers(cached.headers) });
       return cached;
     }
 
-    // 2) cache miss：从 KV 读一次
     const ext = (fileId.split('.').pop() || '').toLowerCase();
     const { value, metadata } = await env.MY_BUCKET.getWithMetadata(binKey(fileId), { type: 'arrayBuffer' });
     if (!value) return new Response('File Not Found', { status: 404, headers: BASE_CORS });
 
     const headers = new Headers(BASE_CORS);
     headers.set('Content-Type', MIME_TYPES[ext] || metadata?.type || 'application/octet-stream');
-
-    // 浏览器缓存 + CDN 边缘缓存
-    headers.set('Cache-Control', 'public, max-age=86400, s-maxage=86400, stale-while-revalidate=60');
+    headers.set(
+      'Cache-Control',
+      `public, max-age=${FILE_CACHE_SECONDS}, s-maxage=${FILE_CACHE_SECONDS}, immutable, stale-while-revalidate=60`
+    );
 
     const resp = new Response(value, { headers });
-
-    // 3) 写入 edge cache（不消耗 KV 配额）
     await cache.put(cacheKey, resp.clone());
 
     if (request.method === 'HEAD') return new Response(null, { headers });

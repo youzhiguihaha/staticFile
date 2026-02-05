@@ -1,3 +1,5 @@
+// src/lib/api.ts
+
 export interface FolderItem {
   key: string;
   folderId: string;
@@ -135,6 +137,28 @@ export const api = {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ items }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+  },
+
+  async renameFile(folderId: string, oldName: string, newName: string): Promise<void> {
+    if (!this.checkAuth()) throw new Error('Expired');
+    const token = this.getToken();
+    const res = await fetch('/api/rename-file', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderId, oldName, newName }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+  },
+
+  async renameFolder(parentId: string, folderId: string, oldName: string, newName: string): Promise<void> {
+    if (!this.checkAuth()) throw new Error('Expired');
+    const token = this.getToken();
+    const res = await fetch('/api/rename-folder', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parentId, folderId, oldName, newName }),
     });
     if (!res.ok) throw new Error(await res.text());
   },
