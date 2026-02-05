@@ -42,23 +42,23 @@ interface Node {
   path: string;
 }
 
+// 纯 UI：focus 与按下反馈（不动逻辑）
+const FOCUS_RING =
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2';
+const PRESS_FEEL = 'active:scale-[0.98]';
+
 export function FolderTree({
   refreshNonce = 0,
   invalidateNonce = 0,
   invalidateFolderIds = [],
-
   currentFolderId,
   currentPath,
-
   onNavigate,
-
   onMove,
   enableDnD = true,
-
   mode = 'navigator',
   pickedFolderId,
   onPick,
-
   shared,
 }: Props) {
   const [childrenMapLocal, setChildrenMapLocal] = useState<Map<string, FolderItem[]>>(new Map());
@@ -77,14 +77,6 @@ export function FolderTree({
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
 
   const root: Node = useMemo(() => ({ folderId: 'root', name: '根目录', path: '' }), []);
-
-  // 触屏设备（粗指针）上 HTML5 DnD 兼容差，且会影响滚动体验
-  // 不改变桌面功能：桌面仍可拖拽；移动端仍可用“移动到/剪切粘贴”等功能移动
-  const isCoarsePointer = useMemo(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) return false;
-    return window.matchMedia('(pointer: coarse)').matches;
-  }, []);
-  const dndEnabled = !!enableDnD && !!onMove && !isCoarsePointer && mode === 'navigator';
 
   const setLoading = (folderId: string, on: boolean) => {
     setLoadingIds((prev) => {
@@ -178,14 +170,12 @@ export function FolderTree({
       return;
     }
 
-    // 体验优化：先展开再加载（不改变逻辑结果，只提升响应感）
+    await loadChildren(node);
     setExpanded((prev) => {
       const next = new Set(prev);
       next.add(fid);
       return next;
     });
-
-    loadChildren(node).catch(() => {});
   };
 
   const handleDrop = async (e: React.DragEvent, targetFolderId: string) => {
@@ -193,7 +183,7 @@ export function FolderTree({
     e.stopPropagation();
     setDragOverId(null);
 
-    if (!dndEnabled || !onMove) return;
+    if (!enableDnD || !onMove) return;
 
     const data = e.dataTransfer.getData('application/json');
     if (!data) return;
@@ -238,13 +228,13 @@ export function FolderTree({
       }
     };
 
-    // 缩进封顶：深层目录在手机上不会把文字挤没
+    // 纯 UI：缩进封顶（深层目录不把文字挤没）
     const padLeft = Math.min(level, 6) * 16 + 12;
 
     return (
       <div key={node.folderId}>
         <div
-          className={`flex items-center gap-1.5 py-2 px-2 mx-1 rounded-md cursor-pointer transition-colors min-w-0
+          className={`flex items-center gap-1.5 py-2 px-2 mx-1 rounded-md cursor-pointer transition-colors min-w-0 ${PRESS_FEEL}
             ${isActive ? 'bg-blue-100 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-200/50'}
             ${isPicked ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
             ${dragOverId === node.folderId ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
@@ -252,7 +242,7 @@ export function FolderTree({
           style={{ paddingLeft: `${padLeft}px` }}
           onClick={handleClick}
           onDragOver={
-            dndEnabled
+            enableDnD
               ? (e) => {
                   e.preventDefault();
                   e.stopPropagation();
@@ -260,15 +250,15 @@ export function FolderTree({
                 }
               : undefined
           }
-          onDragLeave={dndEnabled ? () => setDragOverId(null) : undefined}
-          onDrop={dndEnabled ? (e) => handleDrop(e, node.folderId) : undefined}
+          onDragLeave={enableDnD ? () => setDragOverId(null) : undefined}
+          onDrop={enableDnD ? (e) => handleDrop(e, node.folderId) : undefined}
           title={node.name}
         >
           <button
             type="button"
-            className={`rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-7 h-7 flex-shrink-0 ${
-              !canExpand ? 'invisible' : ''
-            }`}
+            className={`rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-7 h-7 flex-shrink-0 ${FOCUS_RING}
+              ${!canExpand ? 'invisible' : ''}
+            `}
             onClick={(e) => {
               e.stopPropagation();
               if (canExpand) toggle(node);
@@ -290,7 +280,7 @@ export function FolderTree({
             <Folder className="w-4 h-4 text-yellow-500 flex-shrink-0" />
           )}
 
-          {/* 名称占满剩余空间并可截断，避免横向滚动 */}
+          {/* 关键：占满剩余空间并截断，避免横向滚动 */}
           <span className="text-sm truncate select-none flex-1 min-w-0">{node.name}</span>
 
           {mode === 'picker' && isPicked && <Check className="w-4 h-4 text-blue-600 ml-auto flex-shrink-0" />}
@@ -309,7 +299,8 @@ export function FolderTree({
   };
 
   return (
-    <div className="w-full h-full overflow-y-auto overflow-x-hidden select-none py-2 px-1 custom-scrollbar">
+    <div className="w-full h-full overflow-y-auto overflow-x-hidden overscroll-contain select-none py-2 px-1 custom-scrollbar">
+      {/* 不要 min-w-fit：否则深层缩进会导致横向溢出 */}
       <div className="w-full min-w-0">{renderNode(root, 0, [])}</div>
     </div>
   );
