@@ -1,3 +1,4 @@
+// public/_worker.js
 // _worker.js
 
 // ======= MIME / CORS =======
@@ -332,6 +333,54 @@ async function handleApi(request, env) {
   if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500, headers: BASE_CORS });
 
   await ensureRoot(env);
+
+  // ===== crumbs: resolve latest breadcrumb chain by folderId =====
+  // 仅 KV get（getDir），不使用 KV list；用于“最近目录/恢复上次目录”在移动/重命名后仍正确
+  if (url.pathname === '/api/crumbs') {
+    if (request.method !== 'GET') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const folderId = (url.searchParams.get('fid') || ROOT_ID).trim() || ROOT_ID;
+
+    // root 快路径（省读）
+    if (folderId === ROOT_ID) {
+      return new Response(JSON.stringify({ success: true, crumbs: [{ folderId: ROOT_ID, name: '根目录', path: '' }] }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...BASE_CORS },
+      });
+    }
+
+    const chain = [];
+    let cur = folderId;
+
+    for (let i = 0; i < 64; i++) {
+      const d = await getDir(env, cur);
+      if (!d) {
+        return new Response(JSON.stringify({ success: false, error: 'Folder not found' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...BASE_CORS },
+        });
+      }
+      chain.push({
+        folderId: d.id,
+        name: d.id === ROOT_ID ? '根目录' : (d.name || ''),
+      });
+      cur = d.parentId || '';
+      if (!cur) break;
+    }
+
+    chain.reverse();
+
+    // 生成 UI path（不参与后端寻址，但前端会用它拼 key/面包屑显示）
+    let p = '';
+    const crumbs = chain.map((c, idx) => {
+      if (idx === 0) return { ...c, path: '' };
+      p += `${c.name}/`;
+      return { ...c, path: p };
+    });
+
+    return new Response(JSON.stringify({ success: true, crumbs }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...BASE_CORS },
+    });
+  }
 
   // ===== list（no-store）=====
   if (url.pathname === '/api/list') {
