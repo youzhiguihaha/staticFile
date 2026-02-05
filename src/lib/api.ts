@@ -39,6 +39,12 @@ export interface ListResponse {
   files: FileItem[];
 }
 
+export interface Crumb {
+  folderId: string;
+  name: string;
+  path: string;
+}
+
 const TOKEN_KEY = 'auth_token';
 const LOGIN_TIME_KEY = 'login_timestamp';
 const TIMEOUT_MS = 12 * 60 * 60 * 1000;
@@ -47,7 +53,14 @@ export const api = {
   checkAuth() {
     const timeStr = localStorage.getItem(LOGIN_TIME_KEY);
     if (!timeStr) return false;
-    if (Date.now() - parseInt(timeStr) > TIMEOUT_MS) {
+
+    const ts = Number(timeStr);
+    if (!Number.isFinite(ts)) {
+      this.logout();
+      return false;
+    }
+
+    if (Date.now() - ts > TIMEOUT_MS) {
       this.logout();
       return false;
     }
@@ -86,6 +99,17 @@ export const api = {
     const res = await fetch(`/api/list?${qs}`, { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error(await res.text());
     return await res.json();
+  },
+
+  // 解析最新面包屑链：folder 移动/重命名后仍正确（只读，不增加 KV 写/删）
+  async crumbs(folderId: string): Promise<Crumb[]> {
+    if (!this.checkAuth()) throw new Error('Expired');
+    const token = this.getToken();
+    const qs = new URLSearchParams({ fid: folderId }).toString();
+    const res = await fetch(`/api/crumbs?${qs}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    return Array.isArray(data?.crumbs) ? (data.crumbs as Crumb[]) : [];
   },
 
   async createFolder(parentId: string, name: string): Promise<void> {
