@@ -42,11 +42,6 @@ interface Node {
   path: string;
 }
 
-// 纯 UI：focus 与按下反馈（不动逻辑）
-const FOCUS_RING =
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2';
-const PRESS_FEEL = 'active:scale-[0.98]';
-
 export function FolderTree({
   refreshNonce = 0,
   invalidateNonce = 0,
@@ -228,13 +223,13 @@ export function FolderTree({
       }
     };
 
-    // 纯 UI：缩进封顶（深层目录不把文字挤没）
+    // UI：缩进封顶，避免深层目录把文本挤没
     const padLeft = Math.min(level, 6) * 16 + 12;
 
     return (
       <div key={node.folderId}>
         <div
-          className={`flex items-center gap-1.5 py-2 px-2 mx-1 rounded-md cursor-pointer transition-colors min-w-0 ${PRESS_FEEL}
+          className={`flex items-center gap-1.5 py-2 px-2 mx-1 rounded-md cursor-pointer transition-colors min-w-0
             ${isActive ? 'bg-blue-100 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-200/50'}
             ${isPicked ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
             ${dragOverId === node.folderId ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
@@ -256,9 +251,9 @@ export function FolderTree({
         >
           <button
             type="button"
-            className={`rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-7 h-7 flex-shrink-0 ${FOCUS_RING}
-              ${!canExpand ? 'invisible' : ''}
-            `}
+            className={`rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-7 h-7 flex-shrink-0 ${
+              !canExpand ? 'invisible' : ''
+            }`}
             onClick={(e) => {
               e.stopPropagation();
               if (canExpand) toggle(node);
@@ -299,8 +294,7 @@ export function FolderTree({
   };
 
   return (
-    <div className="w-full h-full overflow-y-auto overflow-x-hidden overscroll-contain select-none py-2 px-1 custom-scrollbar">
-      {/* 不要 min-w-fit：否则深层缩进会导致横向溢出 */}
+    <div className="w-full h-full overflow-y-auto overflow-x-hidden select-none py-2 px-1 custom-scrollbar overscroll-contain">
       <div className="w-full min-w-0">{renderNode(root, 0, [])}</div>
     </div>
   );
