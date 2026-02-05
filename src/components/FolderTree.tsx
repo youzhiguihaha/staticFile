@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Folder, FolderOpen, ChevronRight, ChevronDown, Check } from 'lucide-react';
+import { Folder, FolderOpen, ChevronRight, ChevronDown, Check, Loader2 } from 'lucide-react';
 import { api, FolderItem, MoveItem } from '../lib/api';
 import toast from 'react-hot-toast';
 
@@ -72,37 +72,77 @@ export function FolderTree({
 
   const [dragOverId, setDragOverId] = useState<string | null>(null);
 
+  // ====== loading / inflight 控制（省 list） ======
+  const inflightRef = useRef<Map<string, AbortController>>(new Map());
+  const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
+
   const root: Node = useMemo(() => ({ folderId: 'root', name: '根目录', path: '' }), []);
 
+  const setLoading = (folderId: string, on: boolean) => {
+    setLoadingIds((prev) => {
+      const next = new Set(prev);
+      on ? next.add(folderId) : next.delete(folderId);
+      return next;
+    });
+  };
+
+  const abortInflight = (folderId: string) => {
+    const c = inflightRef.current.get(folderId);
+    if (c) {
+      c.abort();
+      inflightRef.current.delete(folderId);
+      setLoading(folderId, false);
+    }
+  };
+
+  const abortAllInflight = () => {
+    for (const c of inflightRef.current.values()) c.abort();
+    inflightRef.current.clear();
+    setLoadingIds(new Set());
+  };
+
   const loadChildren = async (node: Node, force = false) => {
-    if (!force && childrenMap.has(node.folderId)) return;
+    const fid = node.folderId;
+
+    if (!force && childrenMap.has(fid)) return;
+
+    // 同 folderId 正在加载就不重复发（减少 /api/list）
+    if (!force && inflightRef.current.has(fid)) return;
+
+    if (force) abortInflight(fid);
+
+    const controller = new AbortController();
+    inflightRef.current.set(fid, controller);
+    setLoading(fid, true);
+
     try {
-      const res = await api.list(node.folderId, node.path);
+      const res = await api.list(node.folderId, node.path, { signal: controller.signal });
       setChildrenMap((prev) => {
         const next = new Map(prev);
         next.set(node.folderId, res.folders);
         return next;
       });
-    } catch {
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return; // 预期中止，不提示
       toast.error('加载目录失败');
+    } finally {
+      // 仅当还是同一个 controller 时才清理（避免竞态）
+      const cur = inflightRef.current.get(fid);
+      if (cur === controller) inflightRef.current.delete(fid);
+      setLoading(fid, false);
     }
   };
 
-  // 全量刷新：清缓存（更省心，但读会多一点）
+  // mount + refreshNonce：只走这一条，避免 root 初次加载重复
   useEffect(() => {
+    abortAllInflight();
     setChildrenMap(new Map());
     setExpanded(new Set());
     loadChildren(root, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshNonce]);
 
-  // 初次加载 root
-  useEffect(() => {
-    loadChildren(root);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // 精准失效：只删指定 folderId 的缓存；若已展开则强制重载一次（读便宜）
+  // 精准失效：删指定 folderId 的缓存；若已展开则强制重载一次
   useEffect(() => {
     if (!invalidateFolderIds.length) return;
 
@@ -116,16 +156,33 @@ export function FolderTree({
       if (expanded.has(id)) {
         const info = nodeInfoRef.current.get(id);
         if (info) loadChildren(info, true);
+      } else {
+        // 不在展开态：只清缓存，不读（更省）
+        abortInflight(id);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invalidateNonce]);
 
   const toggle = async (node: Node) => {
+    const fid = node.folderId;
+    const isExpanded = expanded.has(fid);
+
+    if (isExpanded) {
+      // 收起不触发读取（更省）
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        next.delete(fid);
+        return next;
+      });
+      return;
+    }
+
+    // 展开：先加载一次 children（未加载也允许展开，体验更合理）
     await loadChildren(node);
     setExpanded((prev) => {
       const next = new Set(prev);
-      next.has(node.folderId) ? next.delete(node.folderId) : next.add(node.folderId);
+      next.add(fid);
       return next;
     });
   };
@@ -165,18 +222,22 @@ export function FolderTree({
     const isActive = currentFolderId === node.folderId && currentPath === node.path;
     const isPicked = mode === 'picker' && pickedFolderId === node.folderId;
 
+    const loaded = childrenMap.has(node.folderId);
     const kids = childrenMap.get(node.folderId) || [];
-    const hasChildren = kids.length > 0;
+
+    // 关键：未加载时也允许展开（否则永远看不到子目录）
+    const canExpand = !loaded || kids.length > 0;
     const isExpanded = expanded.has(node.folderId);
+    const isLoading = loadingIds.has(node.folderId);
 
     const handleClick = () => {
       if (mode === 'picker') {
         onPick?.(node.folderId, node.path, currentChain);
-        // picker 模式点击也可自动展开（更人性化，不增加 KV 写）
-        if (hasChildren && !isExpanded) toggle(node);
+        // picker 模式点击也可自动展开（更人性化）
+        if (canExpand && !isExpanded) toggle(node);
       } else {
         onNavigate?.(node.folderId, node.path, currentChain);
-        if (hasChildren && !isExpanded) toggle(node);
+        if (canExpand && !isExpanded) toggle(node);
       }
     };
 
@@ -205,14 +266,20 @@ export function FolderTree({
         >
           <div
             className={`p-0.5 rounded hover:bg-slate-300/50 transition-colors flex items-center justify-center w-5 h-5 flex-shrink-0 ${
-              !hasChildren ? 'invisible' : ''
+              !canExpand ? 'invisible' : ''
             }`}
             onClick={(e) => {
               e.stopPropagation();
-              toggle(node);
+              if (canExpand) toggle(node);
             }}
           >
-            {isExpanded ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
+            {isLoading ? (
+              <Loader2 className="w-3 h-3 text-slate-400 animate-spin" />
+            ) : isExpanded ? (
+              <ChevronDown className="w-3 h-3 text-slate-500" />
+            ) : (
+              <ChevronRight className="w-3 h-3 text-slate-400" />
+            )}
           </div>
 
           {isActive || isExpanded ? (
@@ -231,7 +298,13 @@ export function FolderTree({
             {kids
               .slice()
               .sort((a, b) => a.name.localeCompare(b.name))
-              .map((f) => renderNode({ folderId: f.folderId, name: f.name, path: f.key }, level + 1, currentChain))}
+              .map((f) =>
+                renderNode(
+                  { folderId: f.folderId, name: f.name, path: f.key },
+                  level + 1,
+                  currentChain
+                )
+              )}
           </div>
         )}
       </div>

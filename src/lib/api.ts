@@ -59,7 +59,7 @@ export interface UploadResponse {
 }
 
 export interface MoveTargetAdded {
-  files: UploadResultItem[]; // 结构同上传返回（name/fileId/type/size/uploadedAt）
+  files: UploadResultItem[];
   folders: { name: string; folderId: string }[];
 }
 
@@ -79,6 +79,87 @@ async function readTextSafe(res: Response) {
   } catch {
     return 'Request failed';
   }
+}
+
+function abortError() {
+  // 兼容性：DOMException 在现代浏览器都有；极端情况下 fallback Error
+  try {
+    return new DOMException('Aborted', 'AbortError');
+  } catch {
+    const e: any = new Error('Aborted');
+    e.name = 'AbortError';
+    return e;
+  }
+}
+
+// ===== In-flight dedupe for /api/list =====
+// 同一个 (fid|path) 并发只发一次请求，减少 KV.getDir 读取
+type ListKey = string;
+type InflightEntry<T> = {
+  key: string;
+  controller: AbortController;
+  promise: Promise<T>;
+  refCount: number;
+  done: boolean;
+};
+
+const listInflight = new Map<ListKey, InflightEntry<ListResponse>>();
+
+function listKey(folderId: string, path: string) {
+  return `${folderId}|${path}`;
+}
+
+function wrapWithConsumerSignal<T>(
+  entry: InflightEntry<T>,
+  consumerSignal?: AbortSignal
+): Promise<T> {
+  if (!consumerSignal) return entry.promise;
+
+  // 已经 abort：直接退订
+  if (consumerSignal.aborted) {
+    entry.refCount = Math.max(0, entry.refCount - 1);
+    if (entry.refCount === 0 && !entry.done) entry.controller.abort();
+    return Promise.reject(abortError());
+  }
+
+  let settled = false;
+  let unsubscribed = false;
+
+  const onAbort = () => {
+    if (unsubscribed) return;
+    unsubscribed = true;
+    entry.refCount = Math.max(0, entry.refCount - 1);
+    if (entry.refCount === 0 && !entry.done) entry.controller.abort();
+  };
+
+  // consumer abort 只影响自己：我们让返回的 promise 直接 AbortError
+  return new Promise<T>((resolve, reject) => {
+    consumerSignal.addEventListener('abort', onAbort, { once: true });
+
+    entry.promise
+      .then((v) => {
+        settled = true;
+        consumerSignal.removeEventListener('abort', onAbort as any);
+        // 如果调用方在这之前 abort 了，就按 abort 处理
+        if (consumerSignal.aborted) return reject(abortError());
+        resolve(v);
+      })
+      .catch((e) => {
+        settled = true;
+        consumerSignal.removeEventListener('abort', onAbort as any);
+        if (consumerSignal.aborted) return reject(abortError());
+        reject(e);
+      })
+      .finally(() => {
+        // 正常完成时需要退订一次
+        if (!unsubscribed) {
+          unsubscribed = true;
+          entry.refCount = Math.max(0, entry.refCount - 1);
+          // 如果此时所有订阅者都结束了，不需要 abort（done=true 也不会触发）
+          if (entry.refCount === 0 && !entry.done && !settled) entry.controller.abort();
+        }
+      });
+  });
 }
 
 export const api = {
@@ -124,16 +205,44 @@ export const api = {
     }
   },
 
-  async list(folderId: string, path: string): Promise<ListResponse> {
+  // 新增第三参 opts.signal（可选），不影响原有调用
+  async list(folderId: string, path: string, opts?: { signal?: AbortSignal }): Promise<ListResponse> {
     if (!this.checkAuth()) throw new Error('Expired');
+
     const token = this.getToken();
-    const qs = new URLSearchParams({ fid: folderId, path }).toString();
-    const res = await fetch(`/api/list?${qs}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) throw new Error(await readTextSafe(res));
-    return await res.json();
+    const key = listKey(folderId, path);
+
+    // 复用并发中的同参请求
+    let entry = listInflight.get(key);
+    if (!entry) {
+      const controller = new AbortController();
+      const qs = new URLSearchParams({ fid: folderId, path }).toString();
+
+      const promise = fetch(`/api/list?${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      }).then(async (res) => {
+        if (!res.ok) throw new Error(await readTextSafe(res));
+        return (await res.json()) as ListResponse;
+      });
+
+      entry = { key, controller, promise, refCount: 0, done: false };
+      listInflight.set(key, entry);
+
+      // 结束后清理
+      entry.promise
+        .catch(() => {})
+        .finally(() => {
+          entry!.done = true;
+          listInflight.delete(key);
+        });
+    }
+
+    // 每个调用者算一个订阅者
+    entry.refCount += 1;
+    return wrapWithConsumerSignal(entry, opts?.signal);
   },
 
-  // 解析最新面包屑链：folder 移动/重命名后仍正确（只读）
   async crumbs(folderId: string): Promise<Crumb[]> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
@@ -155,7 +264,6 @@ export const api = {
     if (!res.ok) throw new Error(await readTextSafe(res));
   },
 
-  // 改为：返回 uploaded 列表（不改变“上传成功/失败”的功能，只是给 UI 减少一次 list 的机会）
   async upload(files: File[], folderId: string): Promise<UploadResponse> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
@@ -178,7 +286,6 @@ export const api = {
     return { success: true, uploaded: Array.isArray(data?.uploaded) ? data.uploaded : [] };
   },
 
-  // 改为：返回 targetAdded（不改变移动功能，只是给 UI 减少 list 的机会）
   async move(items: MoveItem[], targetFolderId: string): Promise<MoveResponse> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
