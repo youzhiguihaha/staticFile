@@ -1912,7 +1912,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                       isDeleting ? 'text-slate-400 bg-slate-100 cursor-not-allowed' : 'text-slate-600 bg-slate-100 hover:bg-slate-200'
                     }`}
                   >
-                    取���
+                    取消
                   </button>
                   <button
                     onClick={executeDelete}
@@ -1932,3 +1932,4 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
     </div>
   );
 }
+
