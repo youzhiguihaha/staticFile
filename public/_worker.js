@@ -275,22 +275,20 @@ async function isDescendant(env, maybeChildId, maybeAncestorId, limit = 64) {
 
 // ======= fileId：UUID(128-bit)（极致省 KV：不做 KV.get 检测） =======
 function makeFileId(extWithDot) {
-  // crypto.randomUUID() 在 Cloudflare Workers 可用
-  // 去掉 '-'，让 fileId 更短、更 URL 友好
   const base = crypto.randomUUID().replace(/-/g, '');
   return `${base}${extWithDot || ''}`;
 }
 
 // ======= Router =======
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: BASE_CORS });
 
     try {
       const url = new URL(request.url);
 
-      if (url.pathname.startsWith('/api/')) return handleApi(request, env);
-      if (url.pathname.startsWith('/file/')) return handleFile(request, env);
+      if (url.pathname.startsWith('/api/')) return handleApi(request, env, ctx);
+      if (url.pathname.startsWith('/file/')) return handleFile(request, env, ctx);
 
       return env.ASSETS.fetch(request);
     } catch (e) {
@@ -299,7 +297,7 @@ export default {
   },
 };
 
-async function handleApi(request, env) {
+async function handleApi(request, env, ctx) {
   const url = new URL(request.url);
 
   // ===== login =====
@@ -312,17 +310,17 @@ async function handleApi(request, env) {
       if (!ok) {
         return new Response(JSON.stringify({ success: false, reason: 'bad_password' }), {
           status: 401,
-          headers: { 'Content-Type': 'application/json', ...BASE_CORS },
+          headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
         });
       }
       const token = await issueToken(env);
       return new Response(JSON.stringify({ success: true, token, expiresInMs: TOKEN_TTL_MS }), {
-        headers: { 'Content-Type': 'application/json', ...BASE_CORS },
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
       });
     } catch (e) {
       return new Response(JSON.stringify({ success: false, reason: 'server_error', error: String(e?.message || e) }), {
         status: 500,
-        headers: { 'Content-Type': 'application/json', ...BASE_CORS },
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
       });
     }
   }
@@ -330,18 +328,16 @@ async function handleApi(request, env) {
   // ===== auth required =====
   const auth = await requireAuth(request, env);
   if (!auth) return new Response('Unauthorized', { status: 401, headers: BASE_CORS });
-  if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500, headers: BASE_CORS });
+  if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500, headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
 
   await ensureRoot(env);
 
   // ===== crumbs: resolve latest breadcrumb chain by folderId =====
-  // 仅 KV get（getDir），不使用 KV list；用于“最近目录/恢复上次目录”在移动/重命名后仍正确
   if (url.pathname === '/api/crumbs') {
     if (request.method !== 'GET') return new Response(null, { status: 405, headers: BASE_CORS });
 
     const folderId = (url.searchParams.get('fid') || ROOT_ID).trim() || ROOT_ID;
 
-    // root 快路径（省读）
     if (folderId === ROOT_ID) {
       return new Response(JSON.stringify({ success: true, crumbs: [{ folderId: ROOT_ID, name: '根目录', path: '' }] }), {
         headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...BASE_CORS },
@@ -369,7 +365,6 @@ async function handleApi(request, env) {
 
     chain.reverse();
 
-    // 生成 UI path（不参与后端寻址，但前端会用它拼 key/面包屑显示）
     let p = '';
     const crumbs = chain.map((c, idx) => {
       if (idx === 0) return { ...c, path: '' };
@@ -445,7 +440,7 @@ async function handleApi(request, env) {
 
     if (!oldName || !newName) return new Response('Invalid name', { status: 400, headers: BASE_CORS });
     if (oldName === newName) {
-      return new Response(JSON.stringify({ success: true, noop: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
+      return new Response(JSON.stringify({ success: true, noop: true }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
     }
 
     const dir = await getDir(env, folderId);
@@ -461,7 +456,7 @@ async function handleApi(request, env) {
     dir.files[newName] = meta;
 
     await putDir(env, dir);
-    return new Response(JSON.stringify({ success: true, newName }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
+    return new Response(JSON.stringify({ success: true, newName }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
   }
 
   // ===== rename folder (parent dir + child dir only) =====
@@ -476,7 +471,7 @@ async function handleApi(request, env) {
 
     if (!folderId || !oldName || !newName) return new Response('Invalid name', { status: 400, headers: BASE_CORS });
     if (oldName === newName) {
-      return new Response(JSON.stringify({ success: true, noop: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
+      return new Response(JSON.stringify({ success: true, noop: true }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
     }
 
     const parent = await getDir(env, parentId);
@@ -499,7 +494,7 @@ async function handleApi(request, env) {
 
     await putDir(env, parent);
 
-    return new Response(JSON.stringify({ success: true, newName }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
+    return new Response(JSON.stringify({ success: true, newName }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
   }
 
   // ===== create folder =====
@@ -516,8 +511,8 @@ async function handleApi(request, env) {
 
     parent.folders = parent.folders || {};
     if (parent.folders[name]) {
-      return new Response(JSON.stringify({ success: true, folderId: parent.folders[name], existed: true }), {
-        headers: { 'Content-Type': 'application/json', ...BASE_CORS },
+      return new Response(JSON.stringify({ success: true, folderId: parent.folders[name], existed: true, name }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
       });
     }
 
@@ -529,8 +524,8 @@ async function handleApi(request, env) {
     parent.folders[name] = folderId;
     await putDir(env, parent);
 
-    return new Response(JSON.stringify({ success: true, folderId, existed: false }), {
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
+    return new Response(JSON.stringify({ success: true, folderId, existed: false, name }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
     });
   }
 
@@ -550,6 +545,7 @@ async function handleApi(request, env) {
     if (files.length > 200) return new Response('Too many files in one request', { status: 413, headers: BASE_CORS });
 
     let changed = false;
+    const uploaded = [];
 
     for (const f of files) {
       const file = f; // File
@@ -570,19 +566,22 @@ async function handleApi(request, env) {
         metadata: { type: file.type || '', size: file.size || 0, name }
       });
 
-      dir.files[name] = {
+      const meta = {
         fileId,
         type: file.type || MIME_TYPES[(ext.slice(1) || '').toLowerCase()] || 'application/octet-stream',
         size: file.size || 0,
         uploadedAt: now(),
       };
+
+      dir.files[name] = meta;
+      uploaded.push({ name, ...meta });
       changed = true;
     }
 
     if (changed) await putDir(env, dir);
 
-    return new Response(JSON.stringify({ success: true }), {
-      headers: { 'Content-Type': 'application/json', ...BASE_CORS },
+    return new Response(JSON.stringify({ success: true, uploaded }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
     });
   }
 
@@ -610,7 +609,9 @@ async function handleApi(request, env) {
       if (it.kind === 'folder') group.get(fromId).folders.push(it);
     }
     if (group.size === 0) {
-      return new Response(JSON.stringify({ success: true, noop: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
+      return new Response(JSON.stringify({ success: true, noop: true, targetAdded: { files: [], folders: [] } }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS }
+      });
     }
 
     for (const g of group.values()) {
@@ -635,6 +636,10 @@ async function handleApi(request, env) {
 
     let targetDirty = false;
 
+    // 为“减少前端 /api/list 次数”回传目标新增项
+    const targetAddedFiles = [];
+    const targetAddedFolders = [];
+
     for (const [fromId, g] of group.entries()) {
       const src = sourceDirs.get(fromId);
 
@@ -649,6 +654,14 @@ async function handleApi(request, env) {
         delete src.files[name];
         dirty.set(fromId, true);
         targetDirty = true;
+
+        targetAddedFiles.push({
+          name: newName,
+          fileId: meta.fileId,
+          type: meta.type || 'application/octet-stream',
+          size: meta.size || 0,
+          uploadedAt: meta.uploadedAt || 0,
+        });
       }
 
       for (const fd of g.folders) {
@@ -669,6 +682,8 @@ async function handleApi(request, env) {
           moved.name = newName;
           await putDir(env, moved);
         }
+
+        targetAddedFolders.push({ name: newName, folderId });
       }
     }
 
@@ -677,7 +692,9 @@ async function handleApi(request, env) {
     }
     if (targetDirty) await putDir(env, targetDir);
 
-    return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
+    return new Response(JSON.stringify({ success: true, targetAdded: { files: targetAddedFiles, folders: targetAddedFolders } }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS }
+    });
   }
 
   // ===== batch-delete =====
@@ -711,6 +728,7 @@ async function handleApi(request, env) {
     }
 
     const binToDelete = [];
+    const fileIdsToPurgeCache = [];
     const dirToDeleteFolderIds = [];
 
     async function collectFolderRecursive(folderId) {
@@ -720,6 +738,7 @@ async function handleApi(request, env) {
       for (const meta of Object.values(d.files || {})) {
         if (meta?.fileId) {
           binToDelete.push(binKey(meta.fileId));
+          fileIdsToPurgeCache.push(meta.fileId);
           if (binToDelete.length > MAX_BIN_DELETES) throw new Error('TOO_MANY_DELETES');
         }
       }
@@ -743,6 +762,7 @@ async function handleApi(request, env) {
           delete src.files[name];
           dirty.set(fromId, true);
           binToDelete.push(binKey(fileId));
+          fileIdsToPurgeCache.push(fileId);
           if (binToDelete.length > MAX_BIN_DELETES) {
             return new Response('Too many deletes. Please delete in smaller batches.', { status: 413, headers: BASE_CORS });
           }
@@ -779,14 +799,29 @@ async function handleApi(request, env) {
     const uniqDirFolderIds = Array.from(new Set(dirToDeleteFolderIds));
     for (const folderId of uniqDirFolderIds) await deleteDir(env, folderId);
 
-    return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json', ...BASE_CORS } });
+    // ===== 方案C：同时清理 edge cache（不消耗 KV 次数）=====
+    // 避免极端情况下 fileId 复用时返回旧的 immutable 缓存
+    const uniqFileIds = Array.from(new Set(fileIdsToPurgeCache.filter(Boolean)));
+    if (uniqFileIds.length) {
+      const origin = url.origin;
+      const cache = caches.default;
+      const purgeTasks = uniqFileIds.map((fid) => {
+        const p = `/file/${encodeURIComponent(fid)}`;
+        const cacheKey = new Request(origin + p, { method: 'GET' });
+        return cache.delete(cacheKey);
+      });
+      if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(Promise.allSettled(purgeTasks));
+      else await Promise.allSettled(purgeTasks);
+    }
+
+    return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
   }
 
   return new Response('Not Found', { status: 404, headers: BASE_CORS });
 }
 
 // ======= /file with edge cache + immutable 1y =======
-async function handleFile(request, env) {
+async function handleFile(request, env, ctx) {
   try {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return new Response('Method Not Allowed', { status: 405, headers: BASE_CORS });
@@ -818,7 +853,10 @@ async function handleFile(request, env) {
     );
 
     const resp = new Response(value, { headers });
-    await cache.put(cacheKey, resp.clone());
+
+    // 不阻塞首个响应：后台写 cache
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+    else await cache.put(cacheKey, resp.clone());
 
     if (request.method === 'HEAD') return new Response(null, { headers });
     return resp;

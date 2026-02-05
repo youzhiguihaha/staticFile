@@ -45,9 +45,41 @@ export interface Crumb {
   path: string;
 }
 
+export interface UploadResultItem {
+  name: string;
+  fileId: string;
+  type: string;
+  size: number;
+  uploadedAt: number;
+}
+
+export interface UploadResponse {
+  success: true;
+  uploaded: UploadResultItem[];
+}
+
+export interface MoveTargetAdded {
+  files: UploadResultItem[]; // 结构同上传返回（name/fileId/type/size/uploadedAt）
+  folders: { name: string; folderId: string }[];
+}
+
+export interface MoveResponse {
+  success: true;
+  noop?: boolean;
+  targetAdded?: MoveTargetAdded;
+}
+
 const TOKEN_KEY = 'auth_token';
 const LOGIN_TIME_KEY = 'login_timestamp';
 const TIMEOUT_MS = 12 * 60 * 60 * 1000;
+
+async function readTextSafe(res: Response) {
+  try {
+    return await res.text();
+  } catch {
+    return 'Request failed';
+  }
+}
 
 export const api = {
   checkAuth() {
@@ -97,17 +129,17 @@ export const api = {
     const token = this.getToken();
     const qs = new URLSearchParams({ fid: folderId, path }).toString();
     const res = await fetch(`/api/list?${qs}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await readTextSafe(res));
     return await res.json();
   },
 
-  // 解析最新面包屑链：folder 移动/重命名后仍正确（只读，不增加 KV 写/删）
+  // 解析最新面包屑链：folder 移动/重命名后仍正确（只读）
   async crumbs(folderId: string): Promise<Crumb[]> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     const qs = new URLSearchParams({ fid: folderId }).toString();
     const res = await fetch(`/api/crumbs?${qs}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await readTextSafe(res));
     const data = await res.json();
     return Array.isArray(data?.crumbs) ? (data.crumbs as Crumb[]) : [];
   },
@@ -120,10 +152,11 @@ export const api = {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ parentId, name }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await readTextSafe(res));
   },
 
-  async upload(files: File[], folderId: string): Promise<void> {
+  // 改为：返回 uploaded 列表（不改变“上传成功/失败”的功能，只是给 UI 减少一次 list 的机会）
+  async upload(files: File[], folderId: string): Promise<UploadResponse> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     const form = new FormData();
@@ -140,10 +173,13 @@ export const api = {
       headers: { Authorization: `Bearer ${token}` },
       body: form,
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await readTextSafe(res));
+    const data = (await res.json()) as UploadResponse;
+    return { success: true, uploaded: Array.isArray(data?.uploaded) ? data.uploaded : [] };
   },
 
-  async move(items: MoveItem[], targetFolderId: string): Promise<void> {
+  // 改为：返回 targetAdded（不改变移动功能，只是给 UI 减少 list 的机会）
+  async move(items: MoveItem[], targetFolderId: string): Promise<MoveResponse> {
     if (!this.checkAuth()) throw new Error('Expired');
     const token = this.getToken();
     const res = await fetch('/api/move', {
@@ -151,7 +187,9 @@ export const api = {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ items, targetFolderId }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await readTextSafe(res));
+    const data = (await res.json()) as MoveResponse;
+    return data;
   },
 
   async batchDelete(items: DeleteItem[]): Promise<void> {
@@ -162,7 +200,7 @@ export const api = {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ items }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await readTextSafe(res));
   },
 
   async renameFile(folderId: string, oldName: string, newName: string): Promise<void> {
@@ -173,7 +211,7 @@ export const api = {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ folderId, oldName, newName }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await readTextSafe(res));
   },
 
   async renameFolder(parentId: string, folderId: string, oldName: string, newName: string): Promise<void> {
@@ -184,7 +222,7 @@ export const api = {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ parentId, folderId, oldName, newName }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await readTextSafe(res));
   },
 
   getFileUrl(fileId: string) {
