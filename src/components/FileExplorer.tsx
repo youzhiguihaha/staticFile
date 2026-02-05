@@ -1,3 +1,4 @@
+// src/components/FileExplorer.tsx
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, ExplorerItem, FileItem, FolderItem, MoveItem, DeleteItem } from '../lib/api';
 import {
@@ -183,17 +184,20 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
   const saveLastCrumbs = (c: Crumb[]) => {
     try { localStorage.setItem(LS_LAST_CRUMBS, JSON.stringify(c)); } catch {}
   };
+
+  // 最近目录：按“最后 folderId”去重（文件夹移动/重命名不会产生重复项）
   const pushRecent = (c: Crumb[]) => {
     try {
       const raw = localStorage.getItem(LS_RECENT_CRUMBS);
       const list: Crumb[][] = raw ? JSON.parse(raw) : [];
-      const key = (x: Crumb[]) => x.map(i => i.folderId).join('>');
+      const key = (x: Crumb[]) => (x && x.length ? x[x.length - 1].folderId : '');
       const k = key(c);
       const next = [c, ...list.filter(x => key(x) !== k)].slice(0, 8);
       localStorage.setItem(LS_RECENT_CRUMBS, JSON.stringify(next));
       setRecentCrumbs(next);
     } catch {}
   };
+
   const loadRecent = () => {
     try {
       const raw = localStorage.getItem(LS_RECENT_CRUMBS);
@@ -203,21 +207,58 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
     }
   };
 
+  const removeRecentByLastFolderId = (fid: string) => {
+    try {
+      const raw = localStorage.getItem(LS_RECENT_CRUMBS);
+      const list: Crumb[][] = raw ? JSON.parse(raw) : [];
+      const next = list.filter((x) => (x?.length ? x[x.length - 1].folderId : '') !== fid);
+      localStorage.setItem(LS_RECENT_CRUMBS, JSON.stringify(next));
+      setRecentCrumbs(next);
+    } catch {}
+  };
+
+  // ====== load 竞态保护：防止旧请求回写 ======
+  const loadSeqRef = useRef(0);
+
   const load = async (folderId = currentFolderId, path = currentPath) => {
+    const seq = ++loadSeqRef.current;
+
     setLoading(true);
     setLoadError('');
     try {
       const res = await api.list(folderId, path);
+      if (seq !== loadSeqRef.current) return; // 忽略旧请求
       setItems([...res.folders, ...res.files]);
       clearSelection();
     } catch (e: any) {
+      if (seq !== loadSeqRef.current) return;
       setLoadError(e?.message || '加载失败');
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
   };
 
-  // 启动：尝试恢复上次目录（0 KV 写，仅一次 list read）
+  // ====== “可靠跳转”：按 folderId 解析最新 crumbs，再进入（解决最近目录/上次目录在移动后仍指向旧链）=====
+  const navigateToFolderIdResolved = async (folderId: string, opts?: { silent?: boolean }) => {
+    setSearchQuery('');
+    setShowSidebar(false);
+    clearSelection();
+
+    try {
+      const chain = await api.crumbs(folderId);
+      if (!chain.length) throw new Error('Bad crumbs');
+      const last = chain[chain.length - 1];
+      setCrumbs(chain as any);
+      await load(last.folderId, last.path);
+    } catch {
+      if (!opts?.silent) toast.error('该目录已不存在或无法访问，已从最近目录移除');
+      removeRecentByLastFolderId(folderId);
+      setCrumbs([{ folderId: 'root', name: '根目录', path: '' }]);
+      await load('root', '');
+    }
+  };
+
+  // 启动：尝试恢复上次目录（仅一次 crumbs + list；不使用 KV list；不增加 KV 写删）
   useEffect(() => {
     loadRecent();
 
@@ -236,18 +277,11 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         return;
       }
 
-      // 尝试加载最后一个目录，失败则回根（不额外浪费 KV）
       const last = restored[restored.length - 1];
-      setCrumbs(restored);
-      await api.list(last.folderId, last.path)
-        .then((res) => {
-          setItems([...res.folders, ...res.files]);
-          clearSelection();
-        })
-        .catch(async () => {
-          setCrumbs([{ folderId: 'root', name: '根目录', path: '' }]);
-          await load('root', '').catch(() => {});
-        });
+      await navigateToFolderIdResolved(last.folderId, { silent: true }).catch(async () => {
+        setCrumbs([{ folderId: 'root', name: '根目录', path: '' }]);
+        await load('root', '').catch(() => {});
+      });
     };
 
     tryRestore();
@@ -722,7 +756,10 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         setRenameDialog((p) => ({ ...p, open: false }));
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selection.size > 0) initiateDelete();
+        if (selection.size > 0) {
+          e.preventDefault(); // 防浏览器后退
+          initiateDelete();
+        }
       }
       if (e.key.toLowerCase() === 'i' && selection.size === 1) {
         setInfoOpen(true);
@@ -737,16 +774,36 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
   }, [selection, sortedItems, singleSelected]);
 
   // ===== context menu =====
+  const clampMenuPos = (x: number, y: number) => {
+    // w-52 = 208px；高度估一个上限避免出屏（不影响功能，仅修显示）
+    const MENU_W = 208;
+    const MENU_H = 260;
+    const pad = 8;
+    const maxX = Math.max(pad, window.innerWidth - MENU_W - pad);
+    const maxY = Math.max(pad, window.innerHeight - MENU_H - pad);
+    return {
+      x: Math.min(Math.max(x, pad), maxX),
+      y: Math.min(Math.max(y, pad), maxY),
+    };
+  };
+
   const openContextMenuBlank = (e: React.MouseEvent) => {
     e.preventDefault();
-    setContextMenu({ visible: true, x: e.pageX, y: e.pageY, key: null, type: 'blank' });
+    const p = clampMenuPos(e.clientX, e.clientY);
+    setContextMenu({ visible: true, x: p.x, y: p.y, key: null, type: 'blank' });
   };
+
   const openContextMenuItem = (e: React.MouseEvent, item: ExplorerItem) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!selection.has(item.key)) setSelection(new Set([item.key]));
-    setContextMenu({ visible: true, x: e.pageX, y: e.pageY, key: item.key, type: 'item' });
+    if (!selection.has(item.key)) {
+      setSelection(new Set([item.key]));
+      setLastSelectedKey(item.key);
+    }
+    const p = clampMenuPos(e.clientX, e.clientY);
+    setContextMenu({ visible: true, x: p.x, y: p.y, key: item.key, type: 'item' });
   };
+
   useEffect(() => {
     const close = () => setContextMenu((p) => ({ ...p, visible: false }));
     window.addEventListener('click', close);
@@ -775,7 +832,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     key={idx}
                     className="text-left text-xs px-2 py-1.5 rounded-md hover:bg-slate-100 text-slate-700 truncate"
                     title={last.path || '根目录'}
-                    onClick={() => navigateByCrumbs(c)}
+                    onClick={() => navigateToFolderIdResolved(last.folderId)}
                   >
                     {c.map(x => x.name || '根目录').join(' / ')}
                   </button>
@@ -1024,7 +1081,16 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                   onClick={(e) => e.stopPropagation()}
                   title="点击选择文件上传，或拖拽到页面任意位置"
                 >
-                  <input type="file" multiple className="hidden" onChange={(e) => e.target.files && handleUpload(Array.from(e.target.files))} />
+                  <input
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => {
+                      const fs = e.currentTarget.files ? Array.from(e.currentTarget.files) : [];
+                      e.currentTarget.value = ''; // 允许再次选择同一文件触发 change
+                      if (fs.length) handleUpload(fs);
+                    }}
+                  />
                   <UploadCloud className="w-8 h-8 text-slate-400 group-hover:text-blue-500 mb-2 transition-colors" />
                   <span className="text-xs text-slate-500 font-medium">{isUploading ? '上传中...' : '上传'}</span>
                 </label>
@@ -1097,7 +1163,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
             // ===== 列表视图（0 KV）=====
             <div className="p-4">
               <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                <div className="grid grid-cols-[1fr,120px,160px] gap-2 px-3 py-2 text-xs font-semibold text-slate-500 bg-slate-50 border-b border-slate-200">
+                <div className="grid grid-cols-[minmax(0,1fr),80px,120px] sm:grid-cols-[minmax(0,1fr),120px,160px] gap-2 px-3 py-2 text-xs font-semibold text-slate-500 bg-slate-50 border-b border-slate-200">
                   <div>名称</div>
                   <div className="text-right">大小</div>
                   <div className="text-right">时间</div>
@@ -1115,7 +1181,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     return (
                       <div
                         key={item.key}
-                        className={`grid grid-cols-[1fr,120px,160px] gap-2 px-3 py-2 text-sm border-b border-slate-100 cursor-pointer ${
+                        className={`grid grid-cols-[minmax(0,1fr),80px,120px] sm:grid-cols-[minmax(0,1fr),120px,160px] gap-2 px-3 py-2 text-sm border-b border-slate-100 cursor-pointer ${
                           selected ? 'bg-blue-50' : 'hover:bg-slate-50'
                         }`}
                         onClick={(e) => handleItemClick(e, item)}
