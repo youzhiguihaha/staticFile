@@ -1,5 +1,7 @@
 // public/_worker.js
-// _worker.js
+// Cloudflare Workers (module) + KV based file explorer backend
+// 注意：本实现不使用 KV 的 lists/list 操作；仅 get/put/delete/getWithMetadata。
+// 并且尽量减少 KV 读写；/file 使用 edge cache；删除时 purge edge cache（方案C）。
 
 // ======= MIME / CORS =======
 const MIME_TYPES = {
@@ -51,10 +53,12 @@ const FILE_CACHE_SECONDS = 31536000; // 1 year
 // ======= in-memory caches (reduce KV reads) =======
 let _rootEnsured = false;
 const DIR_CACHE_TTL_MS = 5000;
-const _dirCache = new Map(); // folderId -> { ts, dirObj }
+const _dirCache = new Map(); // folderId -> { ts, dir }
 
 // ======= Utils =======
-function now() { return Date.now(); }
+function now() {
+  return Date.now();
+}
 
 function shortId(len = 12) {
   const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
@@ -64,15 +68,23 @@ function shortId(len = 12) {
   return result;
 }
 
-function dirKey(folderId) { return `${DIR_PREFIX}${folderId}`; }
-function binKey(fileId) { return `${BIN_PREFIX}${fileId}`; }
+function dirKey(folderId) {
+  return `${DIR_PREFIX}${folderId}`;
+}
+function binKey(fileId) {
+  return `${BIN_PREFIX}${fileId}`;
+}
 
 function cleanName(name) {
   return (name || '').replace(/[\/\\|]/g, '').trim();
 }
 
-function utf8Encode(str) { return new TextEncoder().encode(str); }
-function utf8Decode(bytes) { return new TextDecoder().decode(bytes); }
+function utf8Encode(str) {
+  return new TextEncoder().encode(str);
+}
+function utf8Decode(bytes) {
+  return new TextDecoder().decode(bytes);
+}
 
 function base64urlEncodeBytes(bytes) {
   let s = '';
@@ -81,7 +93,8 @@ function base64urlEncodeBytes(bytes) {
 }
 
 function base64urlDecodeToBytes(b64url) {
-  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((b64url.length + 3) % 4);
+  const b64 =
+    b64url.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((b64url.length + 3) % 4);
   const s = atob(b64);
   const out = new Uint8Array(s.length);
   for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
@@ -89,7 +102,9 @@ function base64urlDecodeToBytes(b64url) {
 }
 
 function bytesToHex(bytes) {
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 function hexToBytes(hex) {
@@ -140,7 +155,13 @@ async function hmacSign(env, messageBytes) {
 }
 
 async function pbkdf2Hex(password, saltBytes, iterations, lengthBytes = 32) {
-  const keyMaterial = await crypto.subtle.importKey('raw', utf8Encode(password), 'PBKDF2', false, ['deriveBits']);
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    utf8Encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
   const bits = await crypto.subtle.deriveBits(
     { name: 'PBKDF2', hash: 'SHA-256', salt: saltBytes, iterations },
     keyMaterial,
@@ -206,10 +227,19 @@ async function requireAuth(request, env) {
   return await verifyToken(env, token);
 }
 
-// ======= Directory shard model =======
+// ======= Directory model =======
 function newDir(id, name, parentId) {
   const t = now();
-  return { v: 1, id, name: name || '', parentId: parentId ?? null, createdAt: t, updatedAt: t, folders: {}, files: {} };
+  return {
+    v: 1,
+    id,
+    name: name || '',
+    parentId: parentId ?? null,
+    createdAt: t,
+    updatedAt: t,
+    folders: {},
+    files: {},
+  };
 }
 
 async function ensureRoot(env) {
@@ -273,7 +303,7 @@ async function isDescendant(env, maybeChildId, maybeAncestorId, limit = 64) {
   return false;
 }
 
-// ======= fileId：UUID(128-bit)（极致省 KV：不做 KV.get 检测） =======
+// ======= fileId：UUID(128-bit) =======
 function makeFileId(extWithDot) {
   const base = crypto.randomUUID().replace(/-/g, '');
   return `${base}${extWithDot || ''}`;
@@ -318,30 +348,44 @@ async function handleApi(request, env, ctx) {
         headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
       });
     } catch (e) {
-      return new Response(JSON.stringify({ success: false, reason: 'server_error', error: String(e?.message || e) }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
-      });
+      return new Response(
+        JSON.stringify({ success: false, reason: 'server_error', error: String(e?.message || e) }),
+        {
+          status: 500,
+          headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+        }
+      );
     }
   }
 
   // ===== auth required =====
   const auth = await requireAuth(request, env);
   if (!auth) return new Response('Unauthorized', { status: 401, headers: BASE_CORS });
-  if (!env.MY_BUCKET) return new Response(JSON.stringify({ error: 'KV未绑定' }), { status: 500, headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
+  if (!env.MY_BUCKET)
+    return new Response(JSON.stringify({ error: 'KV未绑定' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
 
   await ensureRoot(env);
 
-  // ===== crumbs: resolve latest breadcrumb chain by folderId =====
+  // ===== crumbs =====
   if (url.pathname === '/api/crumbs') {
     if (request.method !== 'GET') return new Response(null, { status: 405, headers: BASE_CORS });
 
     const folderId = (url.searchParams.get('fid') || ROOT_ID).trim() || ROOT_ID;
 
     if (folderId === ROOT_ID) {
-      return new Response(JSON.stringify({ success: true, crumbs: [{ folderId: ROOT_ID, name: '根目录', path: '' }] }), {
-        headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...BASE_CORS },
-      });
+      return new Response(
+        JSON.stringify({ success: true, crumbs: [{ folderId: ROOT_ID, name: '根目录', path: '' }] }),
+        {
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+            ...BASE_CORS,
+          },
+        }
+      );
     }
 
     const chain = [];
@@ -352,13 +396,14 @@ async function handleApi(request, env, ctx) {
       if (!d) {
         return new Response(JSON.stringify({ success: false, error: 'Folder not found' }), {
           status: 404,
-          headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...BASE_CORS },
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+            ...BASE_CORS,
+          },
         });
       }
-      chain.push({
-        folderId: d.id,
-        name: d.id === ROOT_ID ? '根目录' : (d.name || ''),
-      });
+      chain.push({ folderId: d.id, name: d.id === ROOT_ID ? '根目录' : d.name || '' });
       cur = d.parentId || '';
       if (!cur) break;
     }
@@ -373,11 +418,15 @@ async function handleApi(request, env, ctx) {
     });
 
     return new Response(JSON.stringify({ success: true, crumbs }), {
-      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...BASE_CORS },
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+        ...BASE_CORS,
+      },
     });
   }
 
-  // ===== list（no-store）=====
+  // ===== list =====
   if (url.pathname === '/api/list') {
     const folderId = (url.searchParams.get('fid') || ROOT_ID).trim() || ROOT_ID;
     const path = (url.searchParams.get('path') || '').trim();
@@ -429,7 +478,7 @@ async function handleApi(request, env, ctx) {
     );
   }
 
-  // ===== rename file (dir-only) =====
+  // ===== rename file =====
   if (url.pathname === '/api/rename-file') {
     if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
 
@@ -439,8 +488,11 @@ async function handleApi(request, env, ctx) {
     let newName = cleanName(body?.newName || '');
 
     if (!oldName || !newName) return new Response('Invalid name', { status: 400, headers: BASE_CORS });
+
     if (oldName === newName) {
-      return new Response(JSON.stringify({ success: true, noop: true }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
+      return new Response(JSON.stringify({ success: true, noop: true, newName }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+      });
     }
 
     const dir = await getDir(env, folderId);
@@ -456,10 +508,13 @@ async function handleApi(request, env, ctx) {
     dir.files[newName] = meta;
 
     await putDir(env, dir);
-    return new Response(JSON.stringify({ success: true, newName }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
+
+    return new Response(JSON.stringify({ success: true, newName }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
   }
 
-  // ===== rename folder (parent dir + child dir only) =====
+  // ===== rename folder =====
   if (url.pathname === '/api/rename-folder') {
     if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
 
@@ -470,8 +525,11 @@ async function handleApi(request, env, ctx) {
     let newName = cleanName(body?.newName || '');
 
     if (!folderId || !oldName || !newName) return new Response('Invalid name', { status: 400, headers: BASE_CORS });
+
     if (oldName === newName) {
-      return new Response(JSON.stringify({ success: true, noop: true }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
+      return new Response(JSON.stringify({ success: true, noop: true, newName }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+      });
     }
 
     const parent = await getDir(env, parentId);
@@ -494,7 +552,9 @@ async function handleApi(request, env, ctx) {
 
     await putDir(env, parent);
 
-    return new Response(JSON.stringify({ success: true, newName }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
+    return new Response(JSON.stringify({ success: true, newName }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
   }
 
   // ===== create folder =====
@@ -529,7 +589,7 @@ async function handleApi(request, env, ctx) {
     });
   }
 
-  // ===== upload (UUID fileId，无检测，极致省 KV read) =====
+  // ===== upload =====
   if (url.pathname === '/api/upload') {
     if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
 
@@ -563,12 +623,15 @@ async function handleApi(request, env, ctx) {
       const fileId = makeFileId(ext);
 
       await env.MY_BUCKET.put(binKey(fileId), file.stream(), {
-        metadata: { type: file.type || '', size: file.size || 0, name }
+        metadata: { type: file.type || '', size: file.size || 0, name },
       });
 
       const meta = {
         fileId,
-        type: file.type || MIME_TYPES[(ext.slice(1) || '').toLowerCase()] || 'application/octet-stream',
+        type:
+          file.type ||
+          MIME_TYPES[(ext.slice(1) || '').toLowerCase()] ||
+          'application/octet-stream',
         size: file.size || 0,
         uploadedAt: now(),
       };
@@ -610,7 +673,7 @@ async function handleApi(request, env, ctx) {
     }
     if (group.size === 0) {
       return new Response(JSON.stringify({ success: true, noop: true, targetAdded: { files: [], folders: [] } }), {
-        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS }
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
       });
     }
 
@@ -635,8 +698,6 @@ async function handleApi(request, env, ctx) {
     }
 
     let targetDirty = false;
-
-    // 为“减少前端 /api/list 次数”回传目标新增项
     const targetAddedFiles = [];
     const targetAddedFolders = [];
 
@@ -693,7 +754,7 @@ async function handleApi(request, env, ctx) {
     if (targetDirty) await putDir(env, targetDir);
 
     return new Response(JSON.stringify({ success: true, targetAdded: { files: targetAddedFiles, folders: targetAddedFolders } }), {
-      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS }
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
     });
   }
 
@@ -799,8 +860,7 @@ async function handleApi(request, env, ctx) {
     const uniqDirFolderIds = Array.from(new Set(dirToDeleteFolderIds));
     for (const folderId of uniqDirFolderIds) await deleteDir(env, folderId);
 
-    // ===== 方案C：同时清理 edge cache（不消耗 KV 次数）=====
-    // 避免极端情况下 fileId 复用时返回旧的 immutable 缓存
+    // ===== 方案C：purge edge cache（不消耗 KV 次数）=====
     const uniqFileIds = Array.from(new Set(fileIdsToPurgeCache.filter(Boolean)));
     if (uniqFileIds.length) {
       const origin = url.origin;
@@ -814,7 +874,9 @@ async function handleApi(request, env, ctx) {
       else await Promise.allSettled(purgeTasks);
     }
 
-    return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS } });
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
   }
 
   return new Response('Not Found', { status: 404, headers: BASE_CORS });
