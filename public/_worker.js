@@ -8,9 +8,6 @@ const CRUMBS_TTL_MS = 8000;
 const FILE_META_TTL_MS = 15000;
 const EDGE_FILE_CACHE_TTL = 3600;
 
-const mem = new LruTtlCache(MEM_CACHE_MAX);
-const sf = new SingleFlight();
-
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -266,9 +263,13 @@ class SingleFlight {
   }
 }
 
+// ✅ 放在 class 定义之后，避免初始化时引用未完成
+const mem = new LruTtlCache(MEM_CACHE_MAX);
+const sf = new SingleFlight();
+
 function parseRange(header, total) {
   if (!header || !header.startsWith("bytes=") || total <= 0) return null;
-  if (header.includes(",")) return null; // <- 仅新增这一行
+  if (header.includes(",")) return null;
   const [a, b] = header.slice(6).split("-");
   let start = a === "" ? NaN : Number(a);
   let end = b === "" ? NaN : Number(b);
