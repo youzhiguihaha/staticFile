@@ -101,8 +101,11 @@ type ContextMenuState = { visible: boolean; x: number; y: number; key: string | 
 type ViewMode = 'grid' | 'list';
 type SortMode = 'time' | 'name' | 'size';
 
+type GridDensity = 'comfortable' | 'compact' | 'dense';
+
 const LS_LAST_CRUMBS = 'last_crumbs_v1';
 const LS_RECENT_CRUMBS = 'recent_crumbs_v1';
+const LS_GRID_DENSITY = 'grid_density_v1';
 
 const MAX_UPLOAD_FILES = 200;
 const MAX_UPLOAD_BYTES = 24 * 1024 * 1024;
@@ -155,9 +158,78 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [sortMode, setSortMode] = useState<SortMode>('time');
 
+  // ===== 显示密度（纯 UI）=====
+  const [gridDensity, setGridDensity] = useState<GridDensity>(() => {
+    try {
+      const raw = localStorage.getItem(LS_GRID_DENSITY) as GridDensity | null;
+      if (raw === 'comfortable' || raw === 'compact' || raw === 'dense') return raw;
+    } catch {}
+    // 默认更紧凑：你反馈“偏大”，这里直接让默认小一档
+    return 'compact';
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_GRID_DENSITY, gridDensity);
+    } catch {}
+  }, [gridDensity]);
+
+  const densityLabel = (d: GridDensity) => (d === 'comfortable' ? '舒适' : d === 'compact' ? '紧凑' : '密集');
+
+  const cycleDensity = () => {
+    setGridDensity((d) => (d === 'comfortable' ? 'compact' : d === 'compact' ? 'dense' : 'comfortable'));
+  };
+
+  const gridVars = useMemo(() => {
+    // 用 CSS 变量把“列宽/间距/图标/字体/高宽比”集中控制：随屏幕连续缩放 + 用户可选密度
+    const presets: Record<GridDensity, Record<string, string>> = {
+      comfortable: {
+        '--tile-min': '128px',
+        '--tile-max': '220px',
+        '--grid-gap': 'clamp(10px,1.4vw,16px)',
+        '--grid-pad': 'clamp(12px,2vw,22px)',
+        '--tile-pad': 'clamp(8px,1.1vw,12px)',
+        '--tile-ar': '4/5',
+        '--icon-folder': 'clamp(38px,5.5vw,76px)',
+        '--icon-file': 'clamp(34px,5.1vw,66px)',
+        '--icon-upload': 'clamp(22px,4.2vw,34px)',
+        '--text-name': 'clamp(11px,1.0vw,13.5px)',
+        '--text-meta': 'clamp(10px,0.92vw,12px)',
+      },
+      compact: {
+        '--tile-min': '110px',
+        '--tile-max': '195px',
+        '--grid-gap': 'clamp(8px,1.1vw,14px)',
+        '--grid-pad': 'clamp(10px,1.6vw,18px)',
+        '--tile-pad': 'clamp(7px,1.0vw,11px)',
+        '--tile-ar': '1/1.08',
+        '--icon-folder': 'clamp(32px,4.8vw,66px)',
+        '--icon-file': 'clamp(30px,4.5vw,58px)',
+        '--icon-upload': 'clamp(20px,3.8vw,30px)',
+        '--text-name': 'clamp(10.5px,0.95vw,13px)',
+        '--text-meta': 'clamp(9.5px,0.88vw,11.5px)',
+      },
+      dense: {
+        '--tile-min': '96px',
+        '--tile-max': '175px',
+        '--grid-gap': 'clamp(7px,1vw,12px)',
+        '--grid-pad': 'clamp(10px,1.5vw,16px)',
+        '--tile-pad': 'clamp(6px,0.9vw,10px)',
+        '--tile-ar': '1/1.0',
+        '--icon-folder': 'clamp(28px,4.2vw,58px)',
+        '--icon-file': 'clamp(26px,4.0vw,52px)',
+        '--icon-upload': 'clamp(18px,3.5vw,28px)',
+        '--text-name': 'clamp(10px,0.9vw,12.5px)',
+        '--text-meta': 'clamp(9px,0.84vw,11px)',
+      },
+    };
+
+    return presets[gridDensity] as React.CSSProperties;
+  }, [gridDensity]);
+
   // ===== mobile menus (UI only) =====
-  const [mobileMoreOpen, setMobileMoreOpen] = useState(false); // 无选中状态：视图/排序
-  const [mobileSelMoreOpen, setMobileSelMoreOpen] = useState(false); // 选中状态：收纳不常用动作
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false); // 无选中：视图/排序/密度
+  const [mobileSelMoreOpen, setMobileSelMoreOpen] = useState(false); // 选中：收纳不常用动作
 
   // ===== shared tree =====
   const [childrenMap, setChildrenMap] = useState<Map<string, FolderItem[]>>(new Map());
@@ -468,7 +540,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
       {Array.from({ length: 12 }).map((_, i) => (
         <div
           key={`skg-${i}`}
-          className="animate-pulse flex flex-col items-center p-[clamp(8px,1.2vw,14px)] rounded-xl border border-transparent bg-white/60 aspect-[3/4] pointer-events-none"
+          className="animate-pulse flex flex-col items-center p-[var(--tile-pad)] rounded-xl border border-transparent bg-white/60 pointer-events-none [aspect-ratio:var(--tile-ar)]"
         >
           <div className="flex-1 w-full rounded-lg bg-slate-200/70" />
           <div className="w-full mt-2 px-1">
@@ -503,7 +575,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
   const clampMenuPos = (x: number, y: number) => {
     const MENU_W = 208;
-    const MENU_H = Math.min(420, Math.floor(window.innerHeight * 0.72)); // 纯 UI：更保守避免出屏
+    const MENU_H = Math.min(420, Math.floor(window.innerHeight * 0.72));
     const pad = 8;
     const maxX = Math.max(pad, window.innerWidth - MENU_W - pad);
     const maxY = Math.max(pad, window.innerHeight - MENU_H - pad);
@@ -1111,12 +1183,16 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
   // ======= Render =======
   return (
-    <div className="bg-white rounded-xl shadow-2xl shadow-slate-200/50 border border-slate-200 overflow-hidden w-full h-full min-h-0 flex flex-col sm:flex-row select-none relative antialiased [text-rendering:optimizeLegibility]">
-      {showSidebar && <div className="fixed inset-0 bg-black/20 z-30 sm:hidden" onClick={() => setShowSidebar(false)} />}
+    <div
+      className="bg-white rounded-xl shadow-2xl shadow-slate-200/50 border border-slate-200 overflow-hidden w-full h-full min-h-0 flex flex-col sm:flex-row select-none relative antialiased [text-rendering:optimizeLegibility] isolate"
+      // CSS variables for density
+      style={gridVars}
+    >
+      {showSidebar && <div className="fixed inset-0 bg-black/20 z-[60] sm:hidden" onClick={() => setShowSidebar(false)} />}
 
       {/* Sidebar */}
       <div
-        className={`absolute sm:relative z-40 w-[clamp(16rem,22vw,26rem)] h-full bg-white transition-transform duration-300 transform border-r border-slate-100 ${
+        className={`absolute sm:relative z-[70] w-[clamp(16rem,22vw,26rem)] h-full bg-white transition-transform duration-300 transform border-r border-slate-100 ${
           showSidebar ? 'translate-x-0' : '-translate-x-full sm:translate-x-0'
         } flex-shrink-0`}
       >
@@ -1167,7 +1243,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         }}
       >
         {/* Top bar */}
-        <div className="px-[clamp(12px,2vw,24px)] py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20">
+        <div className="px-[clamp(12px,2vw,24px)] py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-[40]">
           <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0">
             <button
               className="sm:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full"
@@ -1415,7 +1491,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
                     {mobileSelMoreOpen && (
                       <div
-                        className="absolute right-0 mt-2 w-52 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden z-30"
+                        className="absolute right-0 mt-2 w-56 bg-white rounded-xl shadow-xl border border-slate-200 overflow-auto max-h-[min(60svh,420px)] z-[80] custom-scrollbar"
                         onClick={(e) => e.stopPropagation()}
                       >
                         <div className="px-3 py-2 text-[11px] text-slate-400 border-b border-slate-100">已选 {selection.size} 项</div>
@@ -1508,7 +1584,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                   </button>
                 )}
 
-                {/* Desktop: 视图 + 排序 */}
+                {/* Desktop: 视图 + 密度 + 排序 */}
                 <div className="hidden md:flex items-center gap-2">
                   <button
                     onClick={() => setViewMode(viewMode === 'grid' ? 'list' : 'grid')}
@@ -1516,6 +1592,14 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     title={viewMode === 'grid' ? '切换列表视图' : '切换网格视图'}
                   >
                     {viewMode === 'grid' ? <ListIcon className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
+                  </button>
+
+                  <button
+                    onClick={cycleDensity}
+                    className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                    title={`显示密度：${densityLabel(gridDensity)}（点击切换）`}
+                  >
+                    <LayoutGrid className="w-5 h-5" />
                   </button>
 
                   <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg p-1">
@@ -1605,7 +1689,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                   <RefreshCw className="w-5 h-5" />
                 </button>
 
-                {/* Mobile: 视图/排序收进更多 */}
+                {/* Mobile: 视图/排序/密度收进更多 */}
                 <div className="relative md:hidden">
                   <button
                     className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg"
@@ -1620,10 +1704,11 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
                   {mobileMoreOpen && (
                     <div
-                      className="absolute right-0 mt-2 w-52 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden z-30"
+                      className="absolute right-0 mt-2 w-56 bg-white rounded-xl shadow-xl border border-slate-200 overflow-auto max-h-[min(60svh,420px)] z-[80] custom-scrollbar"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <div className="px-3 py-2 text-[11px] text-slate-400 border-b border-slate-100">视图</div>
+                      <div className="px-3 py-2 text-[11px] text-slate-400 border-b border-slate-100">显示</div>
+
                       <button
                         className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
                         onClick={() => {
@@ -1633,6 +1718,18 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                       >
                         {viewMode === 'grid' ? <ListIcon className="w-4 h-4" /> : <LayoutGrid className="w-4 h-4" />}
                         切换视图
+                      </button>
+
+                      <button
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                        onClick={() => {
+                          cycleDensity();
+                          // 不关菜单也行，但移动端一般关掉更干净
+                          setMobileMoreOpen(false);
+                        }}
+                      >
+                        <LayoutGrid className="w-4 h-4" />
+                        显示密度：{densityLabel(gridDensity)}
                       </button>
 
                       <div className="px-3 py-2 text-[11px] text-slate-400 border-b border-t border-slate-100">排序</div>
@@ -1707,7 +1804,9 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
                 <button
-                  className={`px-3 py-1.5 text-xs rounded-lg text-white ${isMoving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+                  className={`px-3 py-1.5 text-xs rounded-lg text-white ${
+                    isMoving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+                  }`}
                   disabled={isMoving}
                   onClick={() => handlePaste()}
                   title="粘贴到当前目录"
@@ -1744,16 +1843,16 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
           {viewMode === 'grid' ? (
             <div
               className="
-                p-[clamp(12px,2vw,24px)]
+                p-[var(--grid-pad)]
                 grid
-                [grid-template-columns:repeat(auto-fill,minmax(clamp(140px,22vw,240px),1fr))]
-                gap-[clamp(10px,1.6vw,18px)]
+                [grid-template-columns:repeat(auto-fill,minmax(clamp(var(--tile-min),22vw,var(--tile-max)),1fr))]
+                gap-[var(--grid-gap)]
                 content-start
               "
             >
               {!searchQuery && (
                 <label
-                  className={`flex flex-col items-center justify-center p-[clamp(8px,1.2vw,14px)] border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 hover:bg-blue-50 hover:border-blue-300 cursor-pointer group transition-all aspect-[3/4] ${
+                  className={`flex flex-col items-center justify-center p-[var(--tile-pad)] border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 hover:bg-blue-50 hover:border-blue-300 cursor-pointer group transition-all [aspect-ratio:var(--tile-ar)] ${
                     isUploading ? 'opacity-60 pointer-events-none' : ''
                   }`}
                   onClick={(e) => e.stopPropagation()}
@@ -1769,8 +1868,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                       if (fs.length) handleUpload(fs);
                     }}
                   />
-                  <UploadCloud className="w-[clamp(26px,4.5vw,36px)] h-[clamp(26px,4.5vw,36px)] text-slate-400 group-hover:text-blue-500 mb-2 transition-colors" />
-                  <span className="text-[clamp(11px,1.05vw,13px)] text-slate-500 font-medium">{isUploading ? '上传中...' : '上传'}</span>
+                  <UploadCloud className="w-[var(--icon-upload)] h-[var(--icon-upload)] text-slate-400 group-hover:text-blue-500 mb-2 transition-colors" />
+                  <span className="text-[var(--text-name)] text-slate-500 font-medium">{isUploading ? '上传中...' : '上传'}</span>
                 </label>
               )}
 
@@ -1793,7 +1892,9 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     const fileThumb =
                       !isFolder(item) && item.type?.startsWith('image/') ? api.getFileUrl((item as FileItem).fileId) : '';
 
-                    const metaText = isFolder(item) ? '文件夹' : `${formatBytes((item as FileItem).size)} · ${formatTimeShort((item as FileItem).uploadedAt)}`;
+                    const metaText = isFolder(item)
+                      ? '文件夹'
+                      : `${formatBytes((item as FileItem).size)} · ${formatTimeShort((item as FileItem).uploadedAt)}`;
 
                     const isDropTarget = isFolder(item);
                     const isDragOver = isDropTarget && dragOverFolderKey === item.key;
@@ -1819,7 +1920,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                         }
                         onDragLeave={isDropTarget ? () => setDragOverFolderKey(null) : undefined}
                         onDrop={isDropTarget ? (e) => handleDropToFolderTile(e, item as FolderItem) : undefined}
-                        className={`relative group flex flex-col items-center p-[clamp(8px,1.2vw,14px)] rounded-xl border transition-all cursor-pointer aspect-[3/4]
+                        className={`relative group flex flex-col items-center p-[var(--tile-pad)] rounded-xl border transition-all cursor-pointer [aspect-ratio:var(--tile-ar)]
                           ${
                             selected
                               ? 'border-blue-500 bg-blue-50 shadow-sm ring-1 ring-blue-500 z-10'
@@ -1841,23 +1942,29 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
                         {(selected || isMultiSelectMode) && (
                           <div className="absolute top-2 right-2 z-20 pointer-events-none">
-                            {selected ? <CheckCircle2 className="w-5 h-5 text-blue-600 fill-white" /> : <div className="w-5 h-5 rounded-full border-2 border-slate-300 bg-white/80" />}
+                            {selected ? (
+                              <CheckCircle2 className="w-5 h-5 text-blue-600 fill-white" />
+                            ) : (
+                              <div className="w-5 h-5 rounded-full border-2 border-slate-300 bg-white/80" />
+                            )}
                           </div>
                         )}
 
                         <div className="flex-1 w-full flex items-center justify-center overflow-hidden pointer-events-none">
                           {isFolder(item) ? (
-                            <Folder className="w-[clamp(44px,6vw,84px)] h-[clamp(44px,6vw,84px)] text-blue-400/90 fill-blue-100" />
+                            <Folder className="w-[var(--icon-folder)] h-[var(--icon-folder)] text-blue-400/90 fill-blue-100" />
                           ) : fileThumb ? (
                             <LazyImg src={fileThumb} className="w-full h-full object-contain rounded shadow-sm" />
                           ) : (
-                            <FileText className="w-[clamp(40px,5.5vw,72px)] h-[clamp(40px,5.5vw,72px)] text-slate-400" />
+                            <FileText className="w-[var(--icon-file)] h-[var(--icon-file)] text-slate-400" />
                           )}
                         </div>
 
                         <div className="w-full text-center px-0.5 mt-2">
-                          <div className={`text-[clamp(11px,1.05vw,14px)] font-medium truncate w-full ${selected ? 'text-blue-700' : 'text-slate-700'}`}>{item.name}</div>
-                          <div className="text-[clamp(10px,0.95vw,12px)] text-slate-400 mt-0.5 truncate opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition">
+                          <div className={`text-[var(--text-name)] font-medium truncate w-full ${selected ? 'text-blue-700' : 'text-slate-700'}`}>
+                            {item.name}
+                          </div>
+                          <div className="text-[var(--text-meta)] text-slate-400 mt-0.5 truncate opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition">
                             {metaText}
                           </div>
                         </div>
@@ -1868,7 +1975,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
               )}
             </div>
           ) : (
-            <div className="p-[clamp(12px,2vw,24px)]">
+            <div className="p-[clamp(10px,1.6vw,18px)]">
               <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
                 <div className="grid grid-cols-[minmax(0,1fr),92px,150px] sm:grid-cols-[minmax(0,1fr),120px,170px] lg:grid-cols-[minmax(0,1fr),160px,240px] gap-2 px-3 py-2 text-[clamp(11px,0.95vw,12px)] font-semibold text-slate-500 bg-slate-50 border-b border-slate-200">
                   <div>名称</div>
@@ -1915,7 +2022,11 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                         title={item.key}
                       >
                         <div className="flex items-center gap-2 min-w-0">
-                          {isFolder(item) ? <Folder className="w-4 h-4 text-yellow-500 flex-shrink-0" /> : <FileText className="w-4 h-4 text-slate-400 flex-shrink-0" />}
+                          {isFolder(item) ? (
+                            <Folder className="w-4 h-4 text-yellow-500 flex-shrink-0" />
+                          ) : (
+                            <FileText className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                          )}
                           <span className="truncate flex-1 min-w-0">{item.name}</span>
 
                           <button
@@ -1941,7 +2052,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         {/* ===== 右键菜单 ===== */}
         {contextMenu.visible && (
           <div
-            className="fixed z-50 bg-white/95 backdrop-blur rounded-lg shadow-xl border border-slate-100 w-52 py-1 overflow-auto max-h-[min(70svh,480px)] max-w-[calc(100vw-16px)]"
+            className="fixed z-[90] bg-white/95 backdrop-blur rounded-lg shadow-xl border border-slate-100 w-52 py-1 overflow-auto max-h-[min(70svh,480px)] max-w-[calc(100vw-16px)] custom-scrollbar"
             style={{ top: contextMenu.y, left: contextMenu.x }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -2060,8 +2171,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
         {/* ===== Move To Dialog ===== */}
         {moveToOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isMoving && setMoveToOpen(false)}>
-            <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-4 border border-slate-100 max-h-[90svh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isMoving && setMoveToOpen(false)}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-4 border border-slate-100 max-h-[90svh] overflow-auto custom-scrollbar" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between px-2 py-2">
                 <div>
                   <div className="text-base font-bold text-slate-800">移动到...</div>
@@ -2102,8 +2213,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
         {/* ===== Rename Dialog ===== */}
         {renameDialog.open && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isRenaming && setRenameDialog((p) => ({ ...p, open: false }))}>
-            <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 border border-slate-100 max-h-[90svh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isRenaming && setRenameDialog((p) => ({ ...p, open: false }))}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 border border-slate-100 max-h-[90svh] overflow-auto custom-scrollbar" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between">
                 <div className="text-base font-bold text-slate-800">重命名</div>
                 <button className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" onClick={() => !isRenaming && setRenameDialog((p) => ({ ...p, open: false }))}>
@@ -2140,7 +2251,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
         {/* ===== Info Drawer ===== */}
         {infoOpen && (
-          <div className="fixed inset-0 z-50 flex justify-end bg-black/20" onClick={() => setInfoOpen(false)}>
+          <div className="fixed inset-0 z-[90] flex justify-end bg-black/20" onClick={() => setInfoOpen(false)}>
             <div className="w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 p-4 overflow-auto custom-scrollbar" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between">
                 <div className="text-lg font-bold text-slate-800">详情</div>
@@ -2213,8 +2324,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
         {/* ===== Delete Confirm ===== */}
         {deleteConfirm.isOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isDeleting && setDeleteConfirm({ isOpen: false, targets: [] })}>
-            <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-100 max-h-[90svh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isDeleting && setDeleteConfirm({ isOpen: false, targets: [] })}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-100 max-h-[90svh] overflow-auto custom-scrollbar" onClick={(e) => e.stopPropagation()}>
               <div className="flex flex-col items-center text-center gap-4">
                 <div className="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center">
                   <AlertTriangle className="w-6 h-6 text-red-500" />
@@ -2230,14 +2341,18 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                   <button
                     onClick={() => setDeleteConfirm({ isOpen: false, targets: [] })}
                     disabled={isDeleting}
-                    className={`px-4 py-2 text-sm font-medium rounded-xl ${isDeleting ? 'text-slate-400 bg-slate-100 cursor-not-allowed' : 'text-slate-600 bg-slate-100 hover:bg-slate-200'}`}
+                    className={`px-4 py-2 text-sm font-medium rounded-xl ${
+                      isDeleting ? 'text-slate-400 bg-slate-100 cursor-not-allowed' : 'text-slate-600 bg-slate-100 hover:bg-slate-200'
+                    }`}
                   >
                     取消
                   </button>
                   <button
                     onClick={executeDelete}
                     disabled={isDeleting}
-                    className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isDeleting ? 'bg-red-300 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600'}`}
+                    className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${
+                      isDeleting ? 'bg-red-300 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600'
+                    }`}
                   >
                     {isDeleting ? '删除中...' : '确认删除'}
                   </button>
