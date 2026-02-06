@@ -1,371 +1,1088 @@
-// _worker.js
-// Cloudflare Worker / Pages Functions 入口（module worker）
-// 目标：不改前端接口路径（/api/list /api/crumbs /file/:id），增强并发与缓存性能
+// public/_worker.js
+// Cloudflare Workers (module) + KV based file explorer backend
+// 注意：本实现不使用 KV 的 lists/list 操作；仅 get/put/delete/getWithMetadata。
+// 并且尽量减少 KV 读写；/file 使用 edge cache；删除时 purge edge cache（方案C）。
 
-const MEM_CACHE_MAX = 6000;
-const LIST_TTL_MS = 8000;
-const CRUMBS_TTL_MS = 8000;
-const FILE_META_TTL_MS = 15000;
-const EDGE_FILE_CACHE_TTL = 3600;
-
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const path = url.pathname;
-
-    if (request.method === "OPTIONS") return handleOptions();
-
-    try {
-      if (request.method === "GET" && path === "/api/list") {
-        return withCors(await handleList(request, env, url));
-      }
-
-      if (request.method === "GET" && path === "/api/crumbs") {
-        return withCors(await handleCrumbs(request, env, url));
-      }
-
-      if ((request.method === "GET" || request.method === "HEAD") && path.startsWith("/file/")) {
-        const fileId = path.slice("/file/".length).trim();
-        if (!fileId) return withCors(text("Bad Request", 400));
-        return withCors(await handleFile(request, env, ctx, fileId));
-      }
-
-      return withCors(text("Not Found", 404));
-    } catch (e) {
-      return withCors(json({ ok: false, error: e?.message || "Internal Error" }, 500));
-    }
-  },
+// ======= MIME / CORS =======
+const MIME_TYPES = {
+  js: 'application/javascript; charset=utf-8',
+  json: 'application/json; charset=utf-8',
+  txt: 'text/plain; charset=utf-8',
+  css: 'text/css; charset=utf-8',
+  html: 'text/html; charset=utf-8',
+  xml: 'application/xml; charset=utf-8',
+  csv: 'text/csv; charset=utf-8',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  mp3: 'audio/mpeg',
+  lrc: 'text/plain; charset=utf-8',
+  mp4: 'video/mp4',
 };
 
-// ===== handlers =====
+const BASE_CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS, HEAD',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type, Range, If-None-Match',
+  'Access-Control-Max-Age': '86400',
+  'Access-Control-Expose-Headers': 'Content-Type, Content-Length, Content-Disposition, ETag',
+};
 
-async function handleList(request, env, url) {
-  const dir = url.searchParams.get("dir") || "root";
-  const kvKey = `list:${dir}`;
-  const mKey = `L:${kvKey}`;
+// ======= KV Key conventions =======
+const ROOT_ID = 'root';
+const DIR_PREFIX = 'dir:'; // dir:<folderId>
+const BIN_PREFIX = 'bin:'; // bin:<fileId>
 
-  let payload = mem.get(mKey);
-  if (!payload) {
-    payload = await sf.do(mKey, async () => {
-      const raw = await env.META_KV.get(kvKey, "text"); // 绑定名：META_KV
-      const arr = raw ? safeJson(raw, []) : [];
-      const body = JSON.stringify({ ok: true, data: arr });
-      const etag = weakEtag(`${kvKey}|${arr.length}|${pickMaxUpdatedAt(arr)}|${body.length}`);
-      const v = { body, etag };
-      mem.set(mKey, v, jitter(LIST_TTL_MS));
-      return v;
-    });
-  }
+// ======= Auth config =======
+const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 12h
 
-  const inm = request.headers.get("If-None-Match");
-  if (inm && inm === payload.etag) {
-    return new Response(null, {
-      status: 304,
-      headers: {
-        ETag: payload.etag,
-        "Cache-Control": "private, max-age=0, must-revalidate",
-      },
-    });
-  }
+// Workers WebCrypto PBKDF2 iterations 上限 100000
+const DEFAULT_PBKDF2_ITER = 100000;
+const MAX_PBKDF2_ITER = 100000;
+const MIN_PBKDF2_ITER = 10000;
 
-  return new Response(payload.body, {
-    status: 200,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      ETag: payload.etag,
-      "Cache-Control": "private, max-age=0, must-revalidate",
-    },
-  });
+// KV value 最大 25MiB（保守一点：24MiB）
+const MAX_FILE_BYTES = 24 * 1024 * 1024;
+
+// /file 资源不可变：一年缓存（适合随机 fileId 永不复用模型）
+const FILE_CACHE_SECONDS = 31536000; // 1 year
+
+// ======= in-memory caches (reduce KV reads) =======
+let _rootEnsured = false;
+
+const DIR_CACHE_TTL_MS = 5000;
+// 增加缓存容量上限，避免 isolate 长时间运行导致 Map 无上限增长
+const DIR_CACHE_MAX = 1024;
+// folderId -> { ts, dir }
+const _dirCache = new Map();
+
+// ======= Utils =======
+function now() {
+  return Date.now();
 }
 
-async function handleCrumbs(request, env, url) {
-  const dir = url.searchParams.get("dir") || "root";
-  const kvKey = `crumbs:${dir}`;
-  const mKey = `C:${kvKey}`;
-
-  let payload = mem.get(mKey);
-  if (!payload) {
-    payload = await sf.do(mKey, async () => {
-      const raw = await env.META_KV.get(kvKey, "text");
-      const arr = raw ? safeJson(raw, []) : [];
-      const body = JSON.stringify({ ok: true, data: arr });
-      const etag = weakEtag(`${kvKey}|${arr.length}|${pickMaxUpdatedAt(arr)}|${body.length}`);
-      const v = { body, etag };
-      mem.set(mKey, v, jitter(CRUMBS_TTL_MS));
-      return v;
-    });
-  }
-
-  const inm = request.headers.get("If-None-Match");
-  if (inm && inm === payload.etag) {
-    return new Response(null, {
-      status: 304,
-      headers: {
-        ETag: payload.etag,
-        "Cache-Control": "private, max-age=0, must-revalidate",
-      },
-    });
-  }
-
-  return new Response(payload.body, {
-    status: 200,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      ETag: payload.etag,
-      "Cache-Control": "private, max-age=0, must-revalidate",
-    },
-  });
+function shortId(len = 12) {
+  const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
+  let result = '';
+  const rv = crypto.getRandomValues(new Uint8Array(len));
+  for (let i = 0; i < len; i++) result += chars[rv[i] % chars.length];
+  return result;
 }
 
-async function handleFile(request, env, ctx, fileId) {
-  const method = request.method;
-  const range = request.headers.get("Range");
-  const isRange = !!range;
-
-  // 1) 元数据缓存（singleflight + 内存短 TTL）
-  const mKey = `FM:${fileId}`;
-  let meta = mem.get(mKey);
-  if (!meta) {
-    meta = await sf.do(mKey, async () => {
-      const raw = await env.META_KV.get(`file:${fileId}`, "text");
-      const m = raw ? safeJson(raw, null) : null;
-      if (m) mem.set(mKey, m, jitter(FILE_META_TTL_MS));
-      return m;
-    });
-  }
-  if (!meta) return text("Not Found", 404);
-
-  const etag = meta.etag || weakEtag(`${fileId}|${meta.updatedAt || 0}|${meta.size || 0}`);
-  const baseHeaders = fileHeaders({
-    etag,
-    contentType: meta.contentType || "application/octet-stream",
-    size: Number(meta.size) || undefined,
-    fileName: meta.name,
-    cacheSeconds: Number(meta.cacheSeconds || EDGE_FILE_CACHE_TTL),
-  });
-
-  const inm = request.headers.get("If-None-Match");
-  if (!isRange && inm && inm === etag) {
-    return new Response(null, { status: 304, headers: baseHeaders });
-  }
-
-  // 2) 直链跳转（最省成本）
-  if (meta.redirectUrl) {
-    const redirectHeaders = new Headers(baseHeaders);
-    redirectHeaders.set("Location", meta.redirectUrl);
-
-    if (method === "HEAD") {
-      return new Response(null, { status: 302, headers: redirectHeaders });
-    }
-
-    // 非 range GET 走 edge cache
-    if (!isRange && method === "GET") {
-      const c = caches.default;
-      const cacheKey = new Request(request.url, { method: "GET" });
-      const hit = await c.match(cacheKey);
-      if (hit) return hit;
-
-      const resp = new Response(null, { status: 302, headers: redirectHeaders });
-      ctx.waitUntil(c.put(cacheKey, resp.clone()));
-      return resp;
-    }
-
-    return new Response(null, { status: 302, headers: redirectHeaders });
-  }
-
-  // 3) HEAD 直接返回，不读二进制
-  if (method === "HEAD") {
-    return new Response(null, { status: 200, headers: baseHeaders });
-  }
-
-  // 4) 非 range GET：先查 edge cache（修复顺序）
-  const cache = caches.default;
-  const cacheKey = new Request(request.url, { method: "GET" });
-  if (!isRange && method === "GET") {
-    const hit = await cache.match(cacheKey);
-    if (hit) return hit;
-  }
-
-  // 5) 读取二进制
-  const dataKey = meta.dataKey || `blob:${fileId}`;
-  const bin = await sf.do(`FB:${dataKey}`, async () => {
-    if (env.BLOB_KV) return await env.BLOB_KV.get(dataKey, "arrayBuffer");
-    return await env.META_KV.get(dataKey, "arrayBuffer");
-  });
-  if (!bin) return text("Not Found", 404);
-
-  const total = bin.byteLength;
-  baseHeaders.set("Content-Length", String(total));
-
-  if (isRange) {
-    const r = parseRange(range, total);
-    if (!r) {
-      return new Response(null, {
-        status: 416,
-        headers: new Headers({ "Content-Range": `bytes */${total}` }),
-      });
-    }
-    const chunk = bin.slice(r.start, r.end + 1);
-    const h = new Headers(baseHeaders);
-    h.set("Content-Range", `bytes ${r.start}-${r.end}/${total}`);
-    h.set("Content-Length", String(r.end - r.start + 1));
-    return new Response(chunk, { status: 206, headers: h });
-  }
-
-  const resp = new Response(bin, { status: 200, headers: baseHeaders });
-  ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-  return resp;
+function dirKey(folderId) {
+  return `${DIR_PREFIX}${folderId}`;
+}
+function binKey(fileId) {
+  return `${BIN_PREFIX}${fileId}`;
 }
 
-// ===== utils =====
-
-class LruTtlCache {
-  constructor(max = 3000) {
-    this.max = max;
-    this.map = new Map();
-  }
-  get(k) {
-    const n = this.map.get(k);
-    if (!n) return null;
-    if (n.exp <= Date.now()) {
-      this.map.delete(k);
-      return null;
-    }
-    this.map.delete(k);
-    this.map.set(k, n);
-    return n.v;
-  }
-  set(k, v, ttlMs) {
-    if (this.map.has(k)) this.map.delete(k);
-    this.map.set(k, { v, exp: Date.now() + ttlMs });
-    if (this.map.size > this.max) {
-      const oldest = this.map.keys().next().value;
-      this.map.delete(oldest);
-    }
-  }
+function cleanName(name) {
+  return (name || '').replace(/[\/\\|]/g, '').trim();
 }
 
-class SingleFlight {
-  constructor() {
-    this.m = new Map();
-  }
-  async do(key, fn) {
-    if (this.m.has(key)) return this.m.get(key);
-    const p = (async () => {
-      try {
-        return await fn();
-      } finally {
-        this.m.delete(key);
-      }
-    })();
-    this.m.set(key, p);
-    return p;
-  }
+// 复用 Encoder/Decoder，减少分配与 GC
+const _TE = new TextEncoder();
+const _TD = new TextDecoder();
+
+function utf8Encode(str) {
+  return _TE.encode(str);
+}
+function utf8Decode(bytes) {
+  return _TD.decode(bytes);
 }
 
-// ✅ 放在 class 定义之后，避免初始化时引用未完成
-const mem = new LruTtlCache(MEM_CACHE_MAX);
-const sf = new SingleFlight();
-
-function parseRange(header, total) {
-  if (!header || !header.startsWith("bytes=") || total <= 0) return null;
-  if (header.includes(",")) return null;
-  const [a, b] = header.slice(6).split("-");
-  let start = a === "" ? NaN : Number(a);
-  let end = b === "" ? NaN : Number(b);
-
-  if (Number.isNaN(start) && Number.isNaN(end)) return null;
-
-  // bytes=-500
-  if (Number.isNaN(start)) {
-    const suffix = end;
-    if (!Number.isFinite(suffix) || suffix <= 0) return null;
-    start = Math.max(0, total - suffix);
-    end = total - 1;
-  } else if (Number.isNaN(end)) {
-    end = total - 1;
-  }
-
-  if (start < 0 || end < 0 || start > end || start >= total) return null;
-  if (end >= total) end = total - 1;
-  return { start, end };
+function base64urlEncodeBytes(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-function weakEtag(input) {
-  const h = fnv1a32(String(input || ""));
-  return `W/"${h.toString(16)}"`;
+function base64urlDecodeToBytes(b64url) {
+  const b64 =
+    b64url.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((b64url.length + 3) % 4);
+  const s = atob(b64);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
 }
+
+function bytesToHex(bytes) {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function hexToBytes(hex) {
+  const h = (hex || '').trim().toLowerCase();
+  if (!h || h.length % 2 !== 0) return null;
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function constantTimeEqualHex(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
+
+function getIterations(env) {
+  const raw = parseInt((env.PBKDF2_ITERATIONS || '').toString(), 10);
+  const v = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PBKDF2_ITER;
+  return Math.min(Math.max(v, MIN_PBKDF2_ITER), MAX_PBKDF2_ITER);
+}
+
+function etagMatched(ifNoneMatch, etag) {
+  if (!ifNoneMatch || !etag) return false;
+  const v = ifNoneMatch.trim();
+  if (v === '*') return true;
+  return v.split(',').some((x) => x.trim() === etag);
+}
+
 function fnv1a32(str) {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i);
-    h = (h * 0x01000193) >>> 0;
+    h = Math.imul(h, 0x01000193);
   }
-  return h >>> 0;
+  return (h >>> 0).toString(16);
 }
 
-function jitter(ms) {
-  return Math.floor(ms * (0.9 + Math.random() * 0.2));
-}
+// ======= Crypto: PBKDF2 + HMAC =======
+let _hmacKeyPromise = null;
 
-function pickMaxUpdatedAt(arr) {
-  let m = 0;
-  for (const x of arr || []) {
-    const v = Number(x?.updatedAt || x?.updateAt || x?.mtime || 0);
-    if (v > m) m = v;
+async function getHmacKey(env) {
+  const secret = (env.TOKEN_SECRET || '').trim();
+  if (!secret) throw new Error('TOKEN_SECRET missing');
+
+  if (!_hmacKeyPromise) {
+    _hmacKeyPromise = crypto.subtle.importKey(
+      'raw',
+      utf8Encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
   }
-  return m;
+  return _hmacKeyPromise;
 }
 
-function safeJson(s, fallback) {
+async function hmacSign(env, messageBytes) {
+  const key = await getHmacKey(env);
+  const sig = await crypto.subtle.sign('HMAC', key, messageBytes);
+  return new Uint8Array(sig);
+}
+
+async function pbkdf2Hex(password, saltBytes, iterations, lengthBytes = 32) {
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    utf8Encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: saltBytes, iterations },
+    keyMaterial,
+    lengthBytes * 8
+  );
+  return bytesToHex(new Uint8Array(bits));
+}
+
+async function verifyPassword(env, passwordInput) {
+  passwordInput = (passwordInput || '').trim();
+
+  const hashHex = (env.PASSWORD_HASH_HEX || '').trim().toLowerCase();
+  const saltHex = (env.PASSWORD_SALT_HEX || '').trim().toLowerCase();
+
+  if (hashHex && saltHex) {
+    const salt = hexToBytes(saltHex);
+    if (!salt) return false;
+    const iterations = getIterations(env);
+    const derived = await pbkdf2Hex(passwordInput, salt, iterations, 32);
+    return constantTimeEqualHex(derived, hashHex);
+  }
+
+  const plain = (env.PASSWORD_PLAIN || env.PASSWORD || '').toString();
+  return passwordInput === plain;
+}
+
+async function issueToken(env) {
+  // now() 只取一次，避免重复系统调用（微优化）
+  const t = now();
+  const payload = { iat: t, exp: t + TOKEN_TTL_MS };
+  const payloadB64 = base64urlEncodeBytes(utf8Encode(JSON.stringify(payload)));
+  const sigB64 = base64urlEncodeBytes(await hmacSign(env, utf8Encode(payloadB64)));
+  return `${payloadB64}.${sigB64}`;
+}
+
+async function verifyToken(env, token) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+
+  const [payloadB64, sigB64] = parts;
+
+  let payload;
   try {
-    return JSON.parse(s);
+    payload = JSON.parse(utf8Decode(base64urlDecodeToBytes(payloadB64)));
   } catch {
-    return fallback;
+    return null;
   }
+  if (!payload?.exp || now() > payload.exp) return null;
+
+  const expected = await hmacSign(env, utf8Encode(payloadB64));
+  let given;
+  try {
+    given = base64urlDecodeToBytes(sigB64);
+  } catch {
+    return null;
+  }
+  if (given.length !== expected.length) return null;
+
+  let r = 0;
+  for (let i = 0; i < given.length; i++) r |= given[i] ^ expected[i];
+  if (r !== 0) return null;
+
+  return payload;
 }
 
-function fileHeaders({ etag, contentType, size, fileName, cacheSeconds }) {
-  const h = new Headers();
-  h.set("ETag", etag);
-  h.set("Content-Type", contentType || "application/octet-stream");
-  h.set("Accept-Ranges", "bytes");
-  h.set("Cache-Control", `public, max-age=${cacheSeconds || 3600}, stale-while-revalidate=86400`);
-  if (typeof size === "number" && size >= 0) h.set("Content-Length", String(size));
-  if (fileName) h.set("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`);
-  return h;
+async function requireAuth(request, env) {
+  const h = request.headers.get('Authorization') || '';
+  const token = h.startsWith('Bearer ') ? h.slice(7) : '';
+  return await verifyToken(env, token);
 }
 
-function handleOptions() {
-  return new Response(null, { status: 204, headers: corsHeaders() });
-}
-
-function withCors(resp) {
-  const h = new Headers(resp.headers);
-  const c = corsHeaders();
-  for (const k in c) h.set(k, c[k]);
-  return new Response(resp.body, { status: resp.status, headers: h });
-}
-
-function corsHeaders() {
+// ======= Directory model =======
+function newDir(id, name, parentId) {
+  const t = now();
   return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, If-None-Match, Range",
-    "Access-Control-Expose-Headers": "ETag, Content-Length, Content-Range, Accept-Ranges, Content-Disposition",
-    "Access-Control-Max-Age": "86400",
+    v: 1,
+    id,
+    name: name || '',
+    parentId: parentId ?? null,
+    createdAt: t,
+    updatedAt: t,
+    folders: {},
+    files: {},
   };
 }
 
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-  });
+// 简单 LRU：利用 Map 插入顺序
+function dirCacheGet(folderId) {
+  const v = _dirCache.get(folderId);
+  if (!v) return null;
+  // 刷新 LRU 顺序
+  _dirCache.delete(folderId);
+  _dirCache.set(folderId, v);
+  return v;
 }
-function text(s, status = 200) {
-  return new Response(s, {
-    status,
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
-  });
+function dirCacheSet(folderId, entry) {
+  _dirCache.set(folderId, entry);
+  if (_dirCache.size > DIR_CACHE_MAX) {
+    const firstKey = _dirCache.keys().next().value;
+    if (firstKey !== undefined) _dirCache.delete(firstKey);
+  }
+}
+function dirCacheDelete(folderId) {
+  _dirCache.delete(folderId);
+}
+
+async function ensureRoot(env) {
+  if (_rootEnsured) return;
+
+  const root = await env.MY_BUCKET.get(dirKey(ROOT_ID), { type: 'json' });
+  if (!root) {
+    const r = newDir(ROOT_ID, '', null);
+    await env.MY_BUCKET.put(dirKey(ROOT_ID), JSON.stringify(r));
+    dirCacheSet(ROOT_ID, { ts: now(), dir: r });
+  } else {
+    dirCacheSet(ROOT_ID, { ts: now(), dir: root });
+  }
+  _rootEnsured = true;
+}
+
+async function getDir(env, folderId) {
+  const t = now();
+  const cached = dirCacheGet(folderId);
+  if (cached && t - cached.ts < DIR_CACHE_TTL_MS) return cached.dir;
+
+  const dir = await env.MY_BUCKET.get(dirKey(folderId), { type: 'json' });
+  if (dir) dirCacheSet(folderId, { ts: t, dir });
+  return dir;
+}
+
+async function putDir(env, dirObj) {
+  dirObj.updatedAt = now();
+  await env.MY_BUCKET.put(dirKey(dirObj.id), JSON.stringify(dirObj));
+  dirCacheSet(dirObj.id, { ts: now(), dir: dirObj });
+}
+
+async function deleteDir(env, folderId) {
+  await env.MY_BUCKET.delete(dirKey(folderId));
+  dirCacheDelete(folderId);
+}
+
+function ensureUniqueName(mapObj, desiredName) {
+  if (!mapObj[desiredName]) return desiredName;
+
+  const dot = desiredName.lastIndexOf('.');
+  const hasExt = dot > 0 && dot < desiredName.length - 1;
+  const base = hasExt ? desiredName.slice(0, dot) : desiredName;
+  const ext = hasExt ? desiredName.slice(dot) : '';
+
+  let i = 1;
+  while (true) {
+    const cand = `${base}(${i})${ext}`;
+    if (!mapObj[cand]) return cand;
+    i++;
+  }
+}
+
+async function isDescendant(env, maybeChildId, maybeAncestorId, limit = 64) {
+  let cur = maybeChildId;
+  for (let i = 0; i < limit; i++) {
+    if (!cur) return false;
+    if (cur === maybeAncestorId) return true;
+    const d = await getDir(env, cur);
+    cur = d?.parentId || null;
+  }
+  return false;
+}
+
+// 预计算祖先集合（用于 move 防循环校验：减少重复 KV 读取）
+async function getAncestorSet(env, startId, limit = 64) {
+  const set = new Set();
+  let cur = startId;
+  for (let i = 0; i < limit; i++) {
+    if (!cur) break;
+    set.add(cur);
+    const d = await getDir(env, cur);
+    cur = d?.parentId || null;
+  }
+  return set;
+}
+
+// ======= fileId：UUID(128-bit) =======
+function makeFileId(extWithDot) {
+  const base = crypto.randomUUID().replace(/-/g, '');
+  return `${base}${extWithDot || ''}`;
+}
+
+// 并发分批（不增加 delete 次数，只减少串行等待的总耗时）
+async function inBatches(items, batchSize, fn) {
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const ret = await Promise.allSettled(batch.map(fn));
+    const failed = ret.find((x) => x.status === 'rejected');
+    if (failed) throw failed.reason || new Error('Batch operation failed');
+  }
+}
+
+// ======= Router =======
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === 'OPTIONS') return new Response(null, { headers: BASE_CORS });
+
+    try {
+      const url = new URL(request.url);
+
+      if (url.pathname.startsWith('/api/')) return handleApi(request, env, ctx);
+      if (url.pathname.startsWith('/file/')) return handleFile(request, env, ctx);
+
+      return env.ASSETS.fetch(request);
+    } catch (e) {
+      return new Response(e?.message || 'Internal Error', { status: 500, headers: BASE_CORS });
+    }
+  },
+};
+
+async function handleApi(request, env, ctx) {
+  const url = new URL(request.url);
+
+  // ===== login =====
+  if (url.pathname === '/api/login') {
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    try {
+      const body = await request.json().catch(() => ({}));
+      const ok = await verifyPassword(env, body?.password || '');
+      if (!ok) {
+        return new Response(JSON.stringify({ success: false, reason: 'bad_password' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+        });
+      }
+      const token = await issueToken(env);
+      return new Response(JSON.stringify({ success: true, token, expiresInMs: TOKEN_TTL_MS }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+      });
+    } catch (e) {
+      return new Response(
+        JSON.stringify({ success: false, reason: 'server_error', error: String(e?.message || e) }),
+        {
+          status: 500,
+          headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+        }
+      );
+    }
+  }
+
+  // ===== auth required =====
+  const auth = await requireAuth(request, env);
+  if (!auth) return new Response('Unauthorized', { status: 401, headers: BASE_CORS });
+  if (!env.MY_BUCKET)
+    return new Response(JSON.stringify({ error: 'KV未绑定' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
+
+  await ensureRoot(env);
+
+  // ===== crumbs =====
+  if (url.pathname === '/api/crumbs') {
+    if (request.method !== 'GET') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const folderId = (url.searchParams.get('fid') || ROOT_ID).trim() || ROOT_ID;
+
+    if (folderId === ROOT_ID) {
+      const etag = `W/"crumbs-root"`;
+      if (etagMatched(request.headers.get('If-None-Match') || '', etag)) {
+        return new Response(null, {
+          status: 304,
+          headers: {
+            'ETag': etag,
+            'Cache-Control': 'private, max-age=0, must-revalidate',
+            'Vary': 'Authorization',
+            ...BASE_CORS,
+          },
+        });
+      }
+
+      return new Response(
+        JSON.stringify({ success: true, crumbs: [{ folderId: ROOT_ID, name: '根目录', path: '' }] }),
+        {
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'private, max-age=0, must-revalidate',
+            'ETag': etag,
+            'Vary': 'Authorization',
+            ...BASE_CORS,
+          },
+        }
+      );
+    }
+
+    const chain = [];
+    let cur = folderId;
+
+    for (let i = 0; i < 64; i++) {
+      const d = await getDir(env, cur);
+      if (!d) {
+        return new Response(JSON.stringify({ success: false, error: 'Folder not found' }), {
+          status: 404,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+            ...BASE_CORS,
+          },
+        });
+      }
+      chain.push({ folderId: d.id, name: d.id === ROOT_ID ? '根目录' : d.name || '' });
+      cur = d.parentId || '';
+      if (!cur) break;
+    }
+
+    chain.reverse();
+
+    let p = '';
+    const crumbs = chain.map((c, idx) => {
+      if (idx === 0) return { ...c, path: '' };
+      p += `${c.name}/`;
+      return { ...c, path: p };
+    });
+
+    const crumbSig = chain.map((c) => `${c.folderId}:${c.name}`).join('|');
+    const etag = `W/"crumbs-${fnv1a32(crumbSig)}"`;
+
+    if (etagMatched(request.headers.get('If-None-Match') || '', etag)) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          'ETag': etag,
+          'Cache-Control': 'private, max-age=0, must-revalidate',
+          'Vary': 'Authorization',
+          ...BASE_CORS,
+        },
+      });
+    }
+
+    return new Response(JSON.stringify({ success: true, crumbs }), {
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'private, max-age=0, must-revalidate',
+        'ETag': etag,
+        'Vary': 'Authorization',
+        ...BASE_CORS,
+      },
+    });
+  }
+
+  // ===== list =====
+  if (url.pathname === '/api/list') {
+    if (request.method !== 'GET') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const folderId = (url.searchParams.get('fid') || ROOT_ID).trim() || ROOT_ID;
+    const path = (url.searchParams.get('path') || '').trim();
+
+    const dir = await getDir(env, folderId);
+    if (!dir) return new Response('Folder not found', { status: 404, headers: BASE_CORS });
+
+    const etag = `W/"list-${dir.id}-${dir.updatedAt || 0}"`;
+    if (etagMatched(request.headers.get('If-None-Match') || '', etag)) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          'ETag': etag,
+          'Cache-Control': 'private, max-age=0, must-revalidate',
+          'Vary': 'Authorization',
+          ...BASE_CORS,
+        },
+      });
+    }
+
+    const folders = Object.entries(dir.folders || {}).map(([name, id]) => ({
+      key: `${path}${name}/`,
+      name,
+      type: 'folder',
+      size: 0,
+      uploadedAt: dir.updatedAt || 0,
+      folderId: id,
+      fileId: null,
+    }));
+
+    const files = Object.entries(dir.files || {}).map(([name, meta]) => ({
+      key: `${path}${name}`,
+      name,
+      type: meta.type || 'application/octet-stream',
+      size: meta.size || 0,
+      uploadedAt: meta.uploadedAt || 0,
+      fileId: meta.fileId,
+    }));
+
+    folders.sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
+    files.sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        folderId: dir.id,
+        parentId: dir.parentId,
+        path,
+        updatedAt: dir.updatedAt || 0,
+        folders,
+        files,
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'private, max-age=0, must-revalidate',
+          'ETag': etag,
+          'Vary': 'Authorization',
+          ...BASE_CORS,
+        },
+      }
+    );
+  }
+
+  // ===== rename file =====
+  if (url.pathname === '/api/rename-file') {
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const body = await request.json().catch(() => null);
+    const folderId = (body?.folderId || '').trim() || ROOT_ID;
+    const oldName = cleanName(body?.oldName || '');
+    let newName = cleanName(body?.newName || '');
+
+    if (!oldName || !newName) return new Response('Invalid name', { status: 400, headers: BASE_CORS });
+
+    if (oldName === newName) {
+      return new Response(JSON.stringify({ success: true, noop: true, newName }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+      });
+    }
+
+    const dir = await getDir(env, folderId);
+    if (!dir) return new Response('Folder not found', { status: 404, headers: BASE_CORS });
+
+    dir.files = dir.files || {};
+    const meta = dir.files[oldName];
+    if (!meta) return new Response('File not found', { status: 404, headers: BASE_CORS });
+
+    newName = ensureUniqueName(dir.files, newName);
+
+    delete dir.files[oldName];
+    dir.files[newName] = meta;
+
+    await putDir(env, dir);
+
+    return new Response(JSON.stringify({ success: true, newName }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
+  }
+
+  // ===== rename folder =====
+  if (url.pathname === '/api/rename-folder') {
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const body = await request.json().catch(() => null);
+    const parentId = (body?.parentId || '').trim() || ROOT_ID;
+    const folderId = (body?.folderId || '').trim();
+    const oldName = cleanName(body?.oldName || '');
+    let newName = cleanName(body?.newName || '');
+
+    if (!folderId || !oldName || !newName) return new Response('Invalid name', { status: 400, headers: BASE_CORS });
+
+    if (oldName === newName) {
+      return new Response(JSON.stringify({ success: true, noop: true, newName }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+      });
+    }
+
+    const parent = await getDir(env, parentId);
+    if (!parent) return new Response('Parent not found', { status: 404, headers: BASE_CORS });
+
+    parent.folders = parent.folders || {};
+    if (parent.folders[oldName] !== folderId) return new Response('Folder mapping not found', { status: 404, headers: BASE_CORS });
+
+    newName = ensureUniqueName(parent.folders, newName);
+
+    delete parent.folders[oldName];
+    parent.folders[newName] = folderId;
+
+    const child = await getDir(env, folderId);
+    if (child) {
+      child.name = newName;
+      child.parentId = parentId;
+      await putDir(env, child);
+    }
+
+    await putDir(env, parent);
+
+    return new Response(JSON.stringify({ success: true, newName }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
+  }
+
+  // ===== create folder =====
+  if (url.pathname === '/api/create-folder') {
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const body = await request.json().catch(() => null);
+    const parentId = (body?.parentId || ROOT_ID).trim() || ROOT_ID;
+    let name = cleanName(body?.name || '');
+    if (!name) return new Response('Invalid name', { status: 400, headers: BASE_CORS });
+
+    const parent = await getDir(env, parentId);
+    if (!parent) return new Response('Parent not found', { status: 404, headers: BASE_CORS });
+
+    parent.folders = parent.folders || {};
+    if (parent.folders[name]) {
+      return new Response(JSON.stringify({ success: true, folderId: parent.folders[name], existed: true, name }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+      });
+    }
+
+    name = ensureUniqueName(parent.folders, name);
+    const folderId = shortId(12);
+    const child = newDir(folderId, name, parentId);
+
+    await putDir(env, child);
+    parent.folders[name] = folderId;
+    await putDir(env, parent);
+
+    return new Response(JSON.stringify({ success: true, folderId, existed: false, name }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
+  }
+
+  // ===== upload =====
+  if (url.pathname === '/api/upload') {
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const formData = await request.formData();
+    const folderId = (formData.get('folderId') || ROOT_ID).toString().trim() || ROOT_ID;
+    const files = formData.getAll('file').filter((f) => f && typeof f === 'object');
+    if (!files.length) return new Response('No file', { status: 400, headers: BASE_CORS });
+
+    const dir = await getDir(env, folderId);
+    if (!dir) return new Response('Folder not found', { status: 404, headers: BASE_CORS });
+
+    dir.files = dir.files || {};
+    if (files.length > 200) return new Response('Too many files in one request', { status: 413, headers: BASE_CORS });
+
+    let changed = false;
+    const uploaded = [];
+
+    for (const f of files) {
+      const file = f; // File
+      if (file.size > MAX_FILE_BYTES) return new Response('File too large', { status: 413, headers: BASE_CORS });
+
+      let name = cleanName(file.name);
+      if (!name) continue;
+
+      name = ensureUniqueName(dir.files, name);
+      const ext = (() => {
+        const i = name.lastIndexOf('.');
+        return i > 0 ? name.slice(i) : '';
+      })();
+
+      const fileId = makeFileId(ext);
+
+      await env.MY_BUCKET.put(binKey(fileId), file.stream(), {
+        metadata: { type: file.type || '', size: file.size || 0, name },
+      });
+
+      const meta = {
+        fileId,
+        type:
+          file.type ||
+          MIME_TYPES[(ext.slice(1) || '').toLowerCase()] ||
+          'application/octet-stream',
+        size: file.size || 0,
+        uploadedAt: now(),
+      };
+
+      dir.files[name] = meta;
+      uploaded.push({ name, ...meta });
+      changed = true;
+    }
+
+    if (changed) await putDir(env, dir);
+
+    return new Response(JSON.stringify({ success: true, uploaded }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
+  }
+
+  // ===== move =====
+  if (url.pathname === '/api/move') {
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const body = await request.json().catch(() => null);
+    const targetFolderId = (body?.targetFolderId || ROOT_ID).trim() || ROOT_ID;
+    const items = Array.isArray(body?.items) ? body.items : [];
+    if (!items.length) return new Response('No items', { status: 400, headers: BASE_CORS });
+
+    const targetDir = await getDir(env, targetFolderId);
+    if (!targetDir) return new Response('Target not found', { status: 404, headers: BASE_CORS });
+    targetDir.folders = targetDir.folders || {};
+    targetDir.files = targetDir.files || {};
+
+    const group = new Map();
+    for (const it of items) {
+      const fromId = (it?.fromFolderId || '').trim();
+      if (!fromId) continue;
+      if (fromId === targetFolderId) continue;
+      if (!group.has(fromId)) group.set(fromId, { files: [], folders: [] });
+      if (it.kind === 'file') group.get(fromId).files.push(it);
+      if (it.kind === 'folder') group.get(fromId).folders.push(it);
+    }
+    if (group.size === 0) {
+      return new Response(JSON.stringify({ success: true, noop: true, targetAdded: { files: [], folders: [] } }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+      });
+    }
+
+    // 防循环校验：预计算 target 的祖先链集合，避免对每个 folder 重复向上读 KV
+    const targetAncestorSet = await getAncestorSet(env, targetFolderId, 64);
+
+    for (const g of group.values()) {
+      for (const fd of g.folders) {
+        const folderId = (fd.folderId || '').trim();
+        if (!folderId) continue;
+        if (folderId === targetFolderId) {
+          return new Response('Invalid move', { status: 400, headers: BASE_CORS });
+        }
+        // 等价判断：folderId 是 target 的祖先 => target 是 folderId 的后代 => 禁止 move
+        if (targetAncestorSet.has(folderId)) {
+          return new Response('Invalid move', { status: 400, headers: BASE_CORS });
+        }
+      }
+    }
+
+    const sourceDirs = new Map();
+    const dirty = new Map();
+    for (const fromId of group.keys()) {
+      const d = await getDir(env, fromId);
+      if (!d) return new Response('Source not found', { status: 404, headers: BASE_CORS });
+      d.folders = d.folders || {};
+      d.files = d.files || {};
+      sourceDirs.set(fromId, d);
+      dirty.set(fromId, false);
+    }
+
+    let targetDirty = false;
+    const targetAddedFiles = [];
+    const targetAddedFolders = [];
+
+    // 记录每个 folderId 的“最后一次更新”（保持原语义：最后一次处理生效）
+    const movedFolderUpdates = new Map(); // folderId -> { parentId, name }
+
+    for (const [fromId, g] of group.entries()) {
+      const src = sourceDirs.get(fromId);
+
+      for (const f of g.files) {
+        let name = cleanName(f?.name || '');
+        if (!name) continue;
+        const meta = src.files[name];
+        if (!meta) continue;
+
+        const newName = ensureUniqueName(targetDir.files, name);
+        targetDir.files[newName] = meta;
+        delete src.files[name];
+        dirty.set(fromId, true);
+        targetDirty = true;
+
+        targetAddedFiles.push({
+          name: newName,
+          fileId: meta.fileId,
+          type: meta.type || 'application/octet-stream',
+          size: meta.size || 0,
+          uploadedAt: meta.uploadedAt || 0,
+        });
+      }
+
+      for (const fd of g.folders) {
+        let name = cleanName(fd?.name || '');
+        const folderId = (fd?.folderId || '').trim();
+        if (!name || !folderId) continue;
+        if (src.folders[name] !== folderId) continue;
+
+        const newName = ensureUniqueName(targetDir.folders, name);
+        targetDir.folders[newName] = folderId;
+        delete src.folders[name];
+        dirty.set(fromId, true);
+        targetDirty = true;
+
+        // 只记录最后一次 name（保持“重复输入时最后一次生效”的语义）
+        movedFolderUpdates.set(folderId, { parentId: targetFolderId, name: newName });
+
+        targetAddedFolders.push({ name: newName, folderId });
+      }
+    }
+
+    // 更新 moved folder 自身（每个 folderId 只写一次，但保持“最后一次生效”语义）
+    for (const [folderId, upd] of movedFolderUpdates.entries()) {
+      const moved = await getDir(env, folderId);
+      if (moved) {
+        moved.parentId = upd.parentId;
+        moved.name = upd.name;
+        await putDir(env, moved);
+      }
+    }
+
+    for (const [id, d] of sourceDirs.entries()) {
+      if (dirty.get(id)) await putDir(env, d);
+    }
+    if (targetDirty) await putDir(env, targetDir);
+
+    return new Response(JSON.stringify({ success: true, targetAdded: { files: targetAddedFiles, folders: targetAddedFolders } }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
+  }
+
+  // ===== batch-delete =====
+  if (url.pathname === '/api/batch-delete') {
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers: BASE_CORS });
+
+    const body = await request.json().catch(() => null);
+    const items = Array.isArray(body?.items) ? body.items : [];
+    if (!items.length) return new Response('No items', { status: 400, headers: BASE_CORS });
+
+    const MAX_BIN_DELETES = 900;
+
+    const group = new Map();
+    for (const it of items) {
+      const fromId = (it?.fromFolderId || '').trim();
+      if (!fromId) continue;
+      if (!group.has(fromId)) group.set(fromId, { files: [], folders: [] });
+      if (it.kind === 'file') group.get(fromId).files.push(it);
+      if (it.kind === 'folder') group.get(fromId).folders.push(it);
+    }
+
+    const sourceDirs = new Map();
+    const dirty = new Map();
+    for (const fromId of group.keys()) {
+      const d = await getDir(env, fromId);
+      if (!d) return new Response('Source not found', { status: 404, headers: BASE_CORS });
+      d.folders = d.folders || {};
+      d.files = d.files || {};
+      sourceDirs.set(fromId, d);
+      dirty.set(fromId, false);
+    }
+
+    const binToDelete = [];
+    const fileIdsToPurgeCache = [];
+    const dirToDeleteFolderIds = [];
+
+    // 收集阶段去重：避免重复遍历子树导致额外 KV 读取
+    const visitedFolderIds = new Set();
+
+    // 迭代 DFS：避免深层递归栈溢出风险
+    async function collectFolderIterative(rootFolderId) {
+      const stack = [rootFolderId];
+
+      while (stack.length) {
+        const folderId = stack.pop();
+        if (!folderId) continue;
+        if (visitedFolderIds.has(folderId)) continue;
+        visitedFolderIds.add(folderId);
+
+        const d = await getDir(env, folderId);
+        if (!d) continue;
+
+        for (const meta of Object.values(d.files || {})) {
+          if (meta?.fileId) {
+            binToDelete.push(binKey(meta.fileId));
+            fileIdsToPurgeCache.push(meta.fileId);
+            if (binToDelete.length > MAX_BIN_DELETES) throw new Error('TOO_MANY_DELETES');
+          }
+        }
+
+        for (const childId of Object.values(d.folders || {})) {
+          stack.push(childId);
+        }
+
+        dirToDeleteFolderIds.push(folderId);
+      }
+    }
+
+    for (const [fromId, g] of group.entries()) {
+      const src = sourceDirs.get(fromId);
+
+      for (const f of g.files) {
+        const name = cleanName(f?.name || '');
+        const fileId = (f?.fileId || '').trim();
+        if (!name || !fileId) continue;
+
+        if (src.files[name]?.fileId === fileId) {
+          delete src.files[name];
+          dirty.set(fromId, true);
+          binToDelete.push(binKey(fileId));
+          fileIdsToPurgeCache.push(fileId);
+          if (binToDelete.length > MAX_BIN_DELETES) {
+            return new Response('Too many deletes. Please delete in smaller batches.', { status: 413, headers: BASE_CORS });
+          }
+        }
+      }
+
+      for (const fd of g.folders) {
+        const name = cleanName(fd?.name || '');
+        const folderId = (fd?.folderId || '').trim();
+        if (!name || !folderId) continue;
+
+        if (src.folders[name] === folderId) {
+          delete src.folders[name];
+          dirty.set(fromId, true);
+          try {
+            await collectFolderIterative(folderId);
+          } catch (e) {
+            if (e?.message === 'TOO_MANY_DELETES') {
+              return new Response('Too many deletes. Please delete in smaller batches.', { status: 413, headers: BASE_CORS });
+            }
+            throw e;
+          }
+        }
+      }
+    }
+
+    for (const [id, d] of sourceDirs.entries()) {
+      if (dirty.get(id)) await putDir(env, d);
+    }
+
+    const uniqBin = Array.from(new Set(binToDelete));
+    // 分批并发删除：不增加 delete 次数，减少总耗时与超时风险
+    await inBatches(uniqBin, 50, (k) => env.MY_BUCKET.delete(k));
+
+    const uniqDirFolderIds = Array.from(new Set(dirToDeleteFolderIds));
+    // 同样分批删除目录 key（通过 deleteDir，确保同步清理 _dirCache）
+    await inBatches(uniqDirFolderIds, 50, (folderId) => deleteDir(env, folderId));
+
+    // ===== 方案C：purge edge cache（不消耗 KV 次数）=====
+    const uniqFileIds = Array.from(new Set(fileIdsToPurgeCache.filter(Boolean)));
+    if (uniqFileIds.length) {
+      const origin = url.origin;
+      const cache = caches.default;
+      const purgeTasks = uniqFileIds.map((fid) => {
+        const p = `/file/${encodeURIComponent(fid)}`;
+        const cacheKey = new Request(origin + p, { method: 'GET' });
+        return cache.delete(cacheKey);
+      });
+      if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(Promise.allSettled(purgeTasks));
+      else await Promise.allSettled(purgeTasks);
+    }
+
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...BASE_CORS },
+    });
+  }
+
+  return new Response('Not Found', { status: 404, headers: BASE_CORS });
+}
+
+// ======= /file with edge cache + immutable 1y =======
+async function handleFile(request, env, ctx) {
+  try {
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      return new Response('Method Not Allowed', { status: 405, headers: BASE_CORS });
+    }
+    if (!env.MY_BUCKET) return new Response('KV not bound', { status: 500, headers: BASE_CORS });
+
+    const url = new URL(request.url);
+    let fileId = '';
+    try {
+      fileId = decodeURIComponent(url.pathname.slice('/file/'.length) || '');
+    } catch {
+      return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
+    }
+
+    if (!fileId || fileId.length < 5) return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
+
+    const cacheKey = new Request(url.origin + url.pathname, { method: 'GET' });
+    const cache = caches.default;
+
+    const cached = await cache.match(cacheKey);
+    if (cached) {
+      if (request.method === 'HEAD') return new Response(null, { status: cached.status, headers: new Headers(cached.headers) });
+      return cached;
+    }
+
+    const ext = (fileId.split('.').pop() || '').toLowerCase();
+    const { value, metadata } = await env.MY_BUCKET.getWithMetadata(binKey(fileId), { type: 'arrayBuffer' });
+    if (!value) return new Response('File Not Found', { status: 404, headers: BASE_CORS });
+
+    const headers = new Headers(BASE_CORS);
+    headers.set('Content-Type', MIME_TYPES[ext] || metadata?.type || 'application/octet-stream');
+    headers.set(
+      'Cache-Control',
+      `public, max-age=${FILE_CACHE_SECONDS}, s-maxage=${FILE_CACHE_SECONDS}, immutable, stale-while-revalidate=60`
+    );
+
+    const resp = new Response(value, { headers });
+
+    // 不阻塞首个响应：后台写 cache
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+    else await cache.put(cacheKey, resp.clone());
+
+    if (request.method === 'HEAD') return new Response(null, { headers });
+    return resp;
+  } catch (e) {
+    return new Response(`File Error: ${e?.message || 'Unknown'}`, { status: 500, headers: BASE_CORS });
+  }
 }
