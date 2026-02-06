@@ -74,6 +74,19 @@ export function FolderTree({
 
   const root: Node = useMemo(() => ({ folderId: 'root', name: '根目录', path: '' }), []);
 
+  // ===== UI: 自动把当前目录滚动到可视区域（体验优化，不改业务）=====
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const target = el.querySelector<HTMLElement>(`[data-fid="${currentFolderId}"]`);
+    if (!target) return;
+
+    // 让 active 行尽量保持在可视区中间附近
+    target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [currentFolderId]);
+
   const setLoading = (folderId: string, on: boolean) => {
     setLoadingIds((prev) => {
       const next = new Set(prev);
@@ -214,29 +227,35 @@ export function FolderTree({
     const isExpanded = expanded.has(node.folderId);
     const isLoading = loadingIds.has(node.folderId);
 
-    const handleClick = () => {
+    const navigateHere = () => {
       if (mode === 'picker') {
         onPick?.(node.folderId, node.path, currentChain);
-        if (canExpand && !isExpanded) toggle(node);
       } else {
         onNavigate?.(node.folderId, node.path, currentChain);
-        if (canExpand && !isExpanded) toggle(node);
       }
     };
 
-    // UI：缩进封顶，避免深层目录把文本挤没（纯 UI）
+    const handleClickRow = () => {
+      // ✅ 体验优化：点“行”一定会导航（显示该目录内容）
+      // 同时，如果可展开且未展开，顺便展开（保持你原风格）
+      navigateHere();
+      if (canExpand && !isExpanded) toggle(node);
+    };
+
+    // UI：缩进封顶，避免深层目录把文本挤没
     const padLeft = Math.min(level, 6) * 16 + 12;
 
     return (
       <div key={node.folderId}>
         <div
+          data-fid={node.folderId}
           className={`flex items-center gap-1.5 py-[clamp(6px,0.9vw,8px)] px-2 mx-1 rounded-md cursor-pointer transition-colors min-w-0
             ${isActive ? 'bg-blue-100 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-200/50'}
             ${isPicked ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
             ${dragOverId === node.folderId ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
           `}
           style={{ paddingLeft: `${padLeft}px` }}
-          onClick={handleClick}
+          onClick={handleClickRow}
           onDragOver={
             enableDnD
               ? (e) => {
@@ -249,6 +268,7 @@ export function FolderTree({
           onDragLeave={enableDnD ? () => setDragOverId(null) : undefined}
           onDrop={enableDnD ? (e) => handleDrop(e, node.folderId) : undefined}
           title={node.name}
+          aria-current={isActive ? 'page' : undefined}
         >
           <button
             type="button"
@@ -256,10 +276,14 @@ export function FolderTree({
               !canExpand ? 'invisible' : ''
             }`}
             onClick={(e) => {
+              // ✅ 关键优化：很多用户会点“箭头”来进入目录
+              // 这里改为：点箭头也会“进入并显示内容”，同时展开/收起（不改业务逻辑，只改交互）
               e.stopPropagation();
+              navigateHere();
               if (canExpand) toggle(node);
             }}
-            aria-label={isExpanded ? '收起' : '展开'}
+            aria-label={isExpanded ? '收起并进入' : '展开并进入'}
+            title={isExpanded ? '收起（并显示该目录内容）' : '展开（并显示该目录内容）'}
           >
             {isLoading ? (
               <Loader2 className="w-3 h-3 text-slate-400 animate-spin" />
@@ -276,7 +300,6 @@ export function FolderTree({
             <Folder className="w-4 h-4 text-yellow-500 flex-shrink-0" />
           )}
 
-          {/* 关键：占满剩余空间并截断，避免横向滚动 */}
           <span className="text-[clamp(12px,1vw,14px)] truncate select-none flex-1 min-w-0">{node.name}</span>
 
           {mode === 'picker' && isPicked && <Check className="w-4 h-4 text-blue-600 ml-auto flex-shrink-0" />}
@@ -295,7 +318,12 @@ export function FolderTree({
   };
 
   return (
-    <div className="w-full h-full overflow-y-auto overflow-x-hidden select-none py-2 px-1 custom-scrollbar overscroll-contain">
+    <div ref={containerRef} className="w-full h-full overflow-y-auto overflow-x-hidden select-none py-2 px-1 custom-scrollbar overscroll-contain">
+      {/* 轻量提示：让用户知道“箭头/行点击都能进入并显示内容” */}
+      <div className="px-3 py-2 text-[11px] text-slate-400">
+        提示：点击文件夹（或左侧箭头）可进入并显示内容
+      </div>
+
       <div className="w-full min-w-0">{renderNode(root, 0, [])}</div>
     </div>
   );
