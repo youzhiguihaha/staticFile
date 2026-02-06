@@ -1,1 +1,33 @@
+/* src/index.css */
 @import "tailwindcss";
+
+@layer utilities {
+  /* 隐藏滚动条但保留滚动能力（适合面包屑等横向滚动容器） */
+  .no-scrollbar {
+    -ms-overflow-style: none; /* IE/旧 Edge */
+    scrollbar-width: none; /* Firefox */
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none; /* Chrome/Safari */
+  }
+
+  /* 轻量自定义滚动条（适合侧边目录树/内容区） */
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.55);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(100, 116, 139, 0.7);
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}

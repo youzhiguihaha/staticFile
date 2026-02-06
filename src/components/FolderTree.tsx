@@ -1,5 +1,6 @@
 // src/components/FolderTree.tsx
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type * as React from 'react';
 import { Folder, FolderOpen, ChevronRight, ChevronDown, Check, Loader2 } from 'lucide-react';
 import { api, FolderItem, MoveItem } from '../lib/api';
 import toast from 'react-hot-toast';
@@ -223,13 +224,13 @@ export function FolderTree({
       }
     };
 
-    // UI：缩进封顶，避免深层目录把文本挤没
+    // UI：缩进封顶，避免深层目录把文本挤没（纯 UI）
     const padLeft = Math.min(level, 6) * 16 + 12;
 
     return (
       <div key={node.folderId}>
         <div
-          className={`flex items-center gap-1.5 py-2 px-2 mx-1 rounded-md cursor-pointer transition-colors min-w-0
+          className={`flex items-center gap-1.5 py-[clamp(6px,0.9vw,8px)] px-2 mx-1 rounded-md cursor-pointer transition-colors min-w-0
             ${isActive ? 'bg-blue-100 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-200/50'}
             ${isPicked ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
             ${dragOverId === node.folderId ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
@@ -276,7 +277,7 @@ export function FolderTree({
           )}
 
           {/* 关键：占满剩余空间并截断，避免横向滚动 */}
-          <span className="text-sm truncate select-none flex-1 min-w-0">{node.name}</span>
+          <span className="text-[clamp(12px,1vw,14px)] truncate select-none flex-1 min-w-0">{node.name}</span>
 
           {mode === 'picker' && isPicked && <Check className="w-4 h-4 text-blue-600 ml-auto flex-shrink-0" />}
         </div>

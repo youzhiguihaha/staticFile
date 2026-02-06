@@ -1,5 +1,6 @@
 // src/components/FileExplorer.tsx
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type * as React from 'react';
 import { api, ExplorerItem, FileItem, FolderItem, MoveItem, DeleteItem } from '../lib/api';
 import {
   Folder,
@@ -154,6 +155,10 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [sortMode, setSortMode] = useState<SortMode>('time');
 
+  // ===== mobile menus (UI only) =====
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false); // 无选中状态：视图/排序
+  const [mobileSelMoreOpen, setMobileSelMoreOpen] = useState(false); // 选中状态：收纳不常用动作
+
   // ===== shared tree =====
   const [childrenMap, setChildrenMap] = useState<Map<string, FolderItem[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -275,6 +280,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
   const navigateToFolderIdResolved = async (folderId: string, opts?: { silent?: boolean }) => {
     setSearchQuery('');
     setShowSidebar(false);
+    setMobileMoreOpen(false);
+    setMobileSelMoreOpen(false);
     clearSelection();
 
     try {
@@ -340,6 +347,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
     setCrumbs(next);
     setSearchQuery('');
     setShowSidebar(false);
+    setMobileMoreOpen(false);
+    setMobileSelMoreOpen(false);
     clearSelection();
     load(last.folderId, last.path).catch(() => {});
   };
@@ -459,7 +468,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
       {Array.from({ length: 12 }).map((_, i) => (
         <div
           key={`skg-${i}`}
-          className="animate-pulse flex flex-col items-center p-2 rounded-xl border border-transparent bg-white/60 aspect-[3/4] pointer-events-none"
+          className="animate-pulse flex flex-col items-center p-[clamp(8px,1.2vw,14px)] rounded-xl border border-transparent bg-white/60 aspect-[3/4] pointer-events-none"
         >
           <div className="flex-1 w-full rounded-lg bg-slate-200/70" />
           <div className="w-full mt-2 px-1">
@@ -494,7 +503,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
   const clampMenuPos = (x: number, y: number) => {
     const MENU_W = 208;
-    const MENU_H = 260;
+    const MENU_H = Math.min(420, Math.floor(window.innerHeight * 0.72)); // 纯 UI：更保守避免出屏
     const pad = 8;
     const maxX = Math.max(pad, window.innerWidth - MENU_W - pad);
     const maxY = Math.max(pad, window.innerHeight - MENU_H - pad);
@@ -503,6 +512,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
   const openContextMenuBlank = (e: React.MouseEvent) => {
     e.preventDefault();
+    setMobileMoreOpen(false);
+    setMobileSelMoreOpen(false);
     const p = clampMenuPos(e.clientX, e.clientY);
     setContextMenu({ visible: true, x: p.x, y: p.y, key: null, type: 'blank' });
   };
@@ -510,6 +521,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
   const openContextMenuItem = (e: React.MouseEvent, item: ExplorerItem) => {
     e.preventDefault();
     e.stopPropagation();
+    setMobileMoreOpen(false);
+    setMobileSelMoreOpen(false);
     if (!selection.has(item.key)) {
       setSelection(new Set([item.key]));
       setLastSelectedKey(item.key);
@@ -521,6 +534,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
   const openItemMenuFromButton = (e: React.MouseEvent, item: ExplorerItem) => {
     e.preventDefault();
     e.stopPropagation();
+    setMobileMoreOpen(false);
+    setMobileSelMoreOpen(false);
     if (!selection.has(item.key)) {
       setSelection(new Set([item.key]));
       setLastSelectedKey(item.key);
@@ -532,6 +547,22 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
   useEffect(() => {
     const close = () => setContextMenu((p) => ({ ...p, visible: false }));
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, []);
+
+  // mobile dropdown close
+  useEffect(() => {
+    const close = () => {
+      setMobileMoreOpen(false);
+      setMobileSelMoreOpen(false);
+    };
     window.addEventListener('click', close);
     window.addEventListener('scroll', close, true);
     window.addEventListener('resize', close);
@@ -913,6 +944,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
     e.dataTransfer.effectAllowed = 'move';
   };
 
+  // UI-only: DnD hover highlight on folder tiles/rows
   const [dragOverFolderKey, setDragOverFolderKey] = useState<string | null>(null);
 
   const handleDropToFolderTile = async (e: React.DragEvent, target: FolderItem) => {
@@ -1047,6 +1079,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         setMoveToOpen(false);
         setInfoOpen(false);
         setRenameDialog((p) => ({ ...p, open: false }));
+        setMobileMoreOpen(false);
+        setMobileSelMoreOpen(false);
       }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -1077,12 +1111,12 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
   // ======= Render =======
   return (
-    <div className="bg-white rounded-xl shadow-2xl shadow-slate-200/50 border border-slate-200 overflow-hidden min-h-[min(600px,100svh)] flex flex-col sm:flex-row select-none relative antialiased [text-rendering:optimizeLegibility]">
+    <div className="bg-white rounded-xl shadow-2xl shadow-slate-200/50 border border-slate-200 overflow-hidden w-full h-full min-h-0 flex flex-col sm:flex-row select-none relative antialiased [text-rendering:optimizeLegibility]">
       {showSidebar && <div className="fixed inset-0 bg-black/20 z-30 sm:hidden" onClick={() => setShowSidebar(false)} />}
 
       {/* Sidebar */}
       <div
-        className={`absolute sm:relative z-40 w-64 lg:w-72 xl:w-80 2xl:w-96 h-full bg-white transition-transform duration-300 transform border-r border-slate-100 ${
+        className={`absolute sm:relative z-40 w-[clamp(16rem,22vw,26rem)] h-full bg-white transition-transform duration-300 transform border-r border-slate-100 ${
           showSidebar ? 'translate-x-0' : '-translate-x-full sm:translate-x-0'
         } flex-shrink-0`}
       >
@@ -1123,7 +1157,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
       {/* Main */}
       <div
-        className="flex-1 flex flex-col min-w-0 bg-white"
+        className="flex-1 flex flex-col min-w-0 min-h-0 bg-white"
         onContextMenu={openContextMenuBlank}
         onClick={() => !isMultiSelectMode && clearSelection()}
         onDragOver={(e) => e.preventDefault()}
@@ -1133,11 +1167,15 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         }}
       >
         {/* Top bar */}
-        <div className="px-4 lg:px-6 py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20">
+        <div className="px-[clamp(12px,2vw,24px)] py-3 border-b border-slate-100 flex gap-3 items-center justify-between bg-white/95 backdrop-blur sticky top-0 z-20">
           <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0">
             <button
               className="sm:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full"
-              onClick={() => setShowSidebar(true)}
+              onClick={() => {
+                setMobileMoreOpen(false);
+                setMobileSelMoreOpen(false);
+                setShowSidebar(true);
+              }}
               title="目录"
             >
               <Menu className="w-5 h-5" />
@@ -1158,14 +1196,14 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
             </button>
 
             {/* Breadcrumb */}
-            <div className="flex items-center gap-1 text-sm min-w-0 overflow-x-auto whitespace-nowrap [scrollbar-width:none] [-ms-overflow-style:none]">
+            <div className="flex items-center gap-1 text-sm min-w-0 overflow-x-auto whitespace-nowrap no-scrollbar">
               {crumbs.map((c, idx) => {
                 const active = idx === crumbs.length - 1;
                 return (
                   <div key={c.folderId} className="flex items-center min-w-0">
                     {idx !== 0 && <span className="text-slate-300 px-1">/</span>}
                     <button
-                      className={`truncate max-w-[140px] lg:max-w-[220px] px-2 py-1 rounded-md ${
+                      className={`truncate max-w-[clamp(110px,22vw,260px)] px-2 py-1 rounded-md ${
                         active ? 'text-slate-800 font-semibold' : 'text-slate-600 hover:bg-slate-100'
                       }`}
                       title={c.path || '根目录'}
@@ -1191,12 +1229,133 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
             {loading && <span className="text-xs text-slate-400 ml-2">加载中...</span>}
           </div>
 
-          {/* Actions（原样保留，只调整搜索框更宽） */}
+          {/* Actions */}
           <div className="flex items-center gap-2">
             {selection.size > 0 ? (
-              <div className="flex items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-100">
-                {selection.size === 1 && singleSelected && !isFolder(singleSelected) && (
-                  <>
+              <>
+                {/* Desktop selection toolbar */}
+                <div className="hidden sm:flex items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-100">
+                  {selection.size === 1 && singleSelected && !isFolder(singleSelected) && (
+                    <>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          window.open(api.getFileUrl((singleSelected as FileItem).fileId), '_blank');
+                        }}
+                        className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-blue-600"
+                        title="打开/下载"
+                      >
+                        <Download className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleCopyLink(singleSelected.key);
+                        }}
+                        className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-blue-600"
+                        title="复制直链"
+                      >
+                        <LinkIcon className="w-4 h-4" />
+                      </button>
+                    </>
+                  )}
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setInfoOpen(true);
+                    }}
+                    className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-slate-900"
+                    title="详情 (I)"
+                  >
+                    <Info className="w-4 h-4" />
+                  </button>
+
+                  {selection.size === 1 && singleSelected && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openRename(singleSelected);
+                      }}
+                      className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-slate-900"
+                      title="重命名 (F2)"
+                    >
+                      <Pencil className="w-4 h-4" />
+                    </button>
+                  )}
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCut();
+                    }}
+                    className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-orange-600"
+                    title="剪切"
+                  >
+                    <Scissors className="w-4 h-4" />
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openMoveToDialog();
+                    }}
+                    className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-blue-600"
+                    title="移动到..."
+                  >
+                    <FolderInput className="w-4 h-4" />
+                  </button>
+
+                  <div className="w-px h-4 bg-slate-200 mx-1" />
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      initiateDelete();
+                    }}
+                    className="p-2 hover:bg-white rounded-md text-red-600 hover:bg-red-50"
+                    title="删除"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+
+                  <span className="px-2 text-xs text-slate-400 font-medium">{selection.size}</span>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      selectAll();
+                    }}
+                    className="p-2 hover:bg-white rounded-md text-slate-600"
+                    title="全选 (Ctrl+A)"
+                  >
+                    <CheckCheck className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      invertSelection();
+                    }}
+                    className="p-2 hover:bg-white rounded-md text-slate-600"
+                    title="反选 (Ctrl+I)"
+                  >
+                    <Replace className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      clearSelection();
+                    }}
+                    className="p-2 hover:bg-white rounded-md text-slate-600"
+                    title="取消选择 (Esc)"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Mobile selection toolbar */}
+                <div className="sm:hidden flex items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-100">
+                  {selection.size === 1 && singleSelected && !isFolder(singleSelected) && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1207,111 +1366,130 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     >
                       <Download className="w-4 h-4" />
                     </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleCopyLink(singleSelected.key);
-                      }}
-                      className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-blue-600"
-                      title="复制直链"
-                    >
-                      <LinkIcon className="w-4 h-4" />
-                    </button>
-                  </>
-                )}
+                  )}
 
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setInfoOpen(true);
-                  }}
-                  className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-slate-900"
-                  title="详情 (I)"
-                >
-                  <Info className="w-4 h-4" />
-                </button>
-
-                {selection.size === 1 && singleSelected && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      openRename(singleSelected);
+                      setInfoOpen(true);
                     }}
-                    className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-slate-900"
-                    title="重命名 (F2)"
+                    className="p-2 hover:bg-white rounded-md text-slate-600"
+                    title="详情"
                   >
-                    <Pencil className="w-4 h-4" />
+                    <Info className="w-4 h-4" />
                   </button>
-                )}
 
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleCut();
-                  }}
-                  className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-orange-600"
-                  title="剪切"
-                >
-                  <Scissors className="w-4 h-4" />
-                </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      initiateDelete();
+                    }}
+                    className="p-2 hover:bg-red-50 rounded-md text-red-600"
+                    title="删除"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
 
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openMoveToDialog();
-                  }}
-                  className="p-2 hover:bg-white rounded-md text-slate-600 hover:text-blue-600"
-                  title="移动到..."
-                >
-                  <FolderInput className="w-4 h-4" />
-                </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      clearSelection();
+                    }}
+                    className="p-2 hover:bg-white rounded-md text-slate-600"
+                    title="取消选择"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
 
-                <div className="w-px h-4 bg-slate-200 mx-1" />
+                  <div className="relative">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMobileSelMoreOpen((v) => !v);
+                      }}
+                      className="p-2 hover:bg-white rounded-md text-slate-600"
+                      title="更多"
+                    >
+                      <MoreHorizontal className="w-4 h-4" />
+                    </button>
 
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    initiateDelete();
-                  }}
-                  className="p-2 hover:bg-white rounded-md text-red-600 hover:bg-red-50"
-                  title="删除"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                    {mobileSelMoreOpen && (
+                      <div
+                        className="absolute right-0 mt-2 w-52 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden z-30"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="px-3 py-2 text-[11px] text-slate-400 border-b border-slate-100">已选 {selection.size} 项</div>
 
-                <span className="px-2 text-xs text-slate-400 font-medium">{selection.size}</span>
+                        {selection.size === 1 && singleSelected && !isFolder(singleSelected) && (
+                          <button
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                            onClick={() => {
+                              setMobileSelMoreOpen(false);
+                              handleCopyLink(singleSelected.key);
+                            }}
+                          >
+                            <LinkIcon className="w-4 h-4" /> 复制直链
+                          </button>
+                        )}
 
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    selectAll();
-                  }}
-                  className="p-2 hover:bg-white rounded-md text-slate-600"
-                  title="全选 (Ctrl+A)"
-                >
-                  <CheckCheck className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    invertSelection();
-                  }}
-                  className="p-2 hover:bg-white rounded-md text-slate-600"
-                  title="反选 (Ctrl+I)"
-                >
-                  <Replace className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    clearSelection();
-                  }}
-                  className="p-2 hover:bg-white rounded-md text-slate-600"
-                  title="取消选择 (Esc)"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+                        {selection.size === 1 && singleSelected && (
+                          <button
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                            onClick={() => {
+                              setMobileSelMoreOpen(false);
+                              openRename(singleSelected);
+                            }}
+                          >
+                            <Pencil className="w-4 h-4" /> 重命名
+                          </button>
+                        )}
+
+                        <button
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                          onClick={() => {
+                            setMobileSelMoreOpen(false);
+                            handleCut();
+                          }}
+                        >
+                          <Scissors className="w-4 h-4" /> 剪切
+                        </button>
+
+                        <button
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                          onClick={() => {
+                            setMobileSelMoreOpen(false);
+                            openMoveToDialog();
+                          }}
+                        >
+                          <FolderInput className="w-4 h-4" /> 移动到...
+                        </button>
+
+                        <div className="h-px bg-slate-100 my-1" />
+
+                        <button
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                          onClick={() => {
+                            setMobileSelMoreOpen(false);
+                            selectAll();
+                          }}
+                        >
+                          <CheckCheck className="w-4 h-4" /> 全选
+                        </button>
+
+                        <button
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                          onClick={() => {
+                            setMobileSelMoreOpen(false);
+                            invertSelection();
+                          }}
+                        >
+                          <Replace className="w-4 h-4" /> 反选
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
             ) : (
               <>
                 {clipboard && (
@@ -1330,44 +1508,48 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                   </button>
                 )}
 
-                <button
-                  onClick={() => setViewMode(viewMode === 'grid' ? 'list' : 'grid')}
-                  className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-                  title={viewMode === 'grid' ? '切换列表视图' : '切换网格视图'}
-                >
-                  {viewMode === 'grid' ? <ListIcon className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
-                </button>
+                {/* Desktop: 视图 + 排序 */}
+                <div className="hidden md:flex items-center gap-2">
+                  <button
+                    onClick={() => setViewMode(viewMode === 'grid' ? 'list' : 'grid')}
+                    className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                    title={viewMode === 'grid' ? '切换列表视图' : '切换网格视图'}
+                  >
+                    {viewMode === 'grid' ? <ListIcon className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
+                  </button>
 
-                <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg p-1">
-                  <button
-                    onClick={() => setSortMode('time')}
-                    className={`p-2 rounded-md ${sortMode === 'time' ? 'bg-white shadow text-blue-600' : 'text-slate-600 hover:bg-white'}`}
-                    title="按时间排序"
-                  >
-                    <Clock3 className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => setSortMode('name')}
-                    className={`p-2 rounded-md ${sortMode === 'name' ? 'bg-white shadow text-blue-600' : 'text-slate-600 hover:bg-white'}`}
-                    title="按名称排序"
-                  >
-                    <ArrowDownAZ className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => setSortMode('size')}
-                    className={`p-2 rounded-md ${sortMode === 'size' ? 'bg-white shadow text-blue-600' : 'text-slate-600 hover:bg-white'}`}
-                    title="按大小排序"
-                  >
-                    <HardDrive className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg p-1">
+                    <button
+                      onClick={() => setSortMode('time')}
+                      className={`p-2 rounded-md ${sortMode === 'time' ? 'bg-white shadow text-blue-600' : 'text-slate-600 hover:bg-white'}`}
+                      title="按时间排序"
+                    >
+                      <Clock3 className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => setSortMode('name')}
+                      className={`p-2 rounded-md ${sortMode === 'name' ? 'bg-white shadow text-blue-600' : 'text-slate-600 hover:bg-white'}`}
+                      title="按名称排序"
+                    >
+                      <ArrowDownAZ className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => setSortMode('size')}
+                      className={`p-2 rounded-md ${sortMode === 'size' ? 'bg-white shadow text-blue-600' : 'text-slate-600 hover:bg-white'}`}
+                      title="按大小排序"
+                    >
+                      <HardDrive className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
+                {/* Desktop search */}
                 <div className="relative group hidden md:block">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     placeholder="搜索(当前目录)..."
-                    className="w-[180px] lg:w-[260px] pl-9 pr-9 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:border-blue-500 outline-none transition-all"
+                    className="w-[clamp(180px,18vw,320px)] pl-9 pr-9 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:border-blue-500 outline-none transition-all select-text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     onClick={(e) => e.stopPropagation()}
@@ -1422,19 +1604,81 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                 >
                   <RefreshCw className="w-5 h-5" />
                 </button>
+
+                {/* Mobile: 视图/排序收进更多 */}
+                <div className="relative md:hidden">
+                  <button
+                    className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg"
+                    title="更多"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMobileMoreOpen((v) => !v);
+                    }}
+                  >
+                    <MoreHorizontal className="w-5 h-5" />
+                  </button>
+
+                  {mobileMoreOpen && (
+                    <div
+                      className="absolute right-0 mt-2 w-52 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden z-30"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="px-3 py-2 text-[11px] text-slate-400 border-b border-slate-100">视图</div>
+                      <button
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                        onClick={() => {
+                          setViewMode(viewMode === 'grid' ? 'list' : 'grid');
+                          setMobileMoreOpen(false);
+                        }}
+                      >
+                        {viewMode === 'grid' ? <ListIcon className="w-4 h-4" /> : <LayoutGrid className="w-4 h-4" />}
+                        切换视图
+                      </button>
+
+                      <div className="px-3 py-2 text-[11px] text-slate-400 border-b border-t border-slate-100">排序</div>
+                      <button
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                        onClick={() => {
+                          setSortMode('time');
+                          setMobileMoreOpen(false);
+                        }}
+                      >
+                        <Clock3 className="w-4 h-4" /> 按时间
+                      </button>
+                      <button
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                        onClick={() => {
+                          setSortMode('name');
+                          setMobileMoreOpen(false);
+                        }}
+                      >
+                        <ArrowDownAZ className="w-4 h-4" /> 按名称
+                      </button>
+                      <button
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                        onClick={() => {
+                          setSortMode('size');
+                          setMobileMoreOpen(false);
+                        }}
+                      >
+                        <HardDrive className="w-4 h-4" /> 按大小
+                      </button>
+                    </div>
+                  )}
+                </div>
               </>
             )}
           </div>
         </div>
 
-        {/* Mobile search（不动） */}
-        <div className="px-4 pb-3 border-b border-slate-100 bg-white md:hidden">
+        {/* Mobile search */}
+        <div className="px-[clamp(12px,2vw,24px)] pb-3 border-b border-slate-100 bg-white md:hidden">
           <div className="relative">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               placeholder="搜索(当前目录)..."
-              className="w-full pl-9 pr-9 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-blue-500 outline-none transition-all"
+              className="w-full pl-9 pr-9 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-blue-500 outline-none transition-all select-text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onClick={(e) => e.stopPropagation()}
@@ -1456,16 +1700,14 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
         {/* Clipboard bar / error */}
         {clipboard && (
-          <div className="px-4 py-2 border-b border-amber-100 bg-amber-50/80">
+          <div className="px-[clamp(12px,2vw,24px)] py-2 border-b border-amber-100 bg-amber-50/80">
             <div className="flex items-center justify-between gap-2">
               <div className="text-xs text-amber-800 truncate">
                 剪切板：已剪切 <span className="font-semibold">{clipboard.length}</span> 项（进入目标目录点击“粘贴”）
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
                 <button
-                  className={`px-3 py-1.5 text-xs rounded-lg text-white ${
-                    isMoving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
-                  }`}
+                  className={`px-3 py-1.5 text-xs rounded-lg text-white ${isMoving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
                   disabled={isMoving}
                   onClick={() => handlePaste()}
                   title="粘贴到当前目录"
@@ -1486,31 +1728,32 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         )}
 
         {loadError && (
-          <div className="px-4 py-2 border-b border-slate-100 bg-red-50 text-red-700 text-sm flex items-center justify-between gap-2">
+          <div className="px-[clamp(12px,2vw,24px)] py-2 border-b border-slate-100 bg-red-50 text-red-700 text-sm flex items-center justify-between gap-2">
             <span className="truncate">加载失败：{loadError}</span>
-            <button className="px-3 py-1 rounded bg-white border border-red-200 hover:bg-red-100 flex-shrink-0" onClick={() => load(currentFolderId, currentPath, { bypassCache: true })}>
+            <button
+              className="px-3 py-1 rounded bg-white border border-red-200 hover:bg-red-100 flex-shrink-0"
+              onClick={() => load(currentFolderId, currentPath, { bypassCache: true })}
+            >
               重试
             </button>
           </div>
         )}
 
         {/* Content */}
-        <div className="flex-1 bg-slate-50/30 overflow-y-auto overscroll-contain">
+        <div className="flex-1 min-h-0 bg-slate-50/30 overflow-y-auto overscroll-contain custom-scrollbar">
           {viewMode === 'grid' ? (
             <div
               className="
-                p-4 lg:p-6
-                grid grid-cols-2
-                sm:[grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]
-                lg:[grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]
-                2xl:[grid-template-columns:repeat(auto-fill,minmax(220px,1fr))]
-                gap-3 lg:gap-4
+                p-[clamp(12px,2vw,24px)]
+                grid
+                [grid-template-columns:repeat(auto-fill,minmax(clamp(140px,22vw,240px),1fr))]
+                gap-[clamp(10px,1.6vw,18px)]
                 content-start
               "
             >
               {!searchQuery && (
                 <label
-                  className={`flex flex-col items-center justify-center p-2 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 hover:bg-blue-50 hover:border-blue-300 cursor-pointer group transition-all aspect-[3/4] ${
+                  className={`flex flex-col items-center justify-center p-[clamp(8px,1.2vw,14px)] border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 hover:bg-blue-50 hover:border-blue-300 cursor-pointer group transition-all aspect-[3/4] ${
                     isUploading ? 'opacity-60 pointer-events-none' : ''
                   }`}
                   onClick={(e) => e.stopPropagation()}
@@ -1526,8 +1769,8 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                       if (fs.length) handleUpload(fs);
                     }}
                   />
-                  <UploadCloud className="w-8 h-8 text-slate-400 group-hover:text-blue-500 mb-2 transition-colors" />
-                  <span className="text-xs text-slate-500 font-medium">{isUploading ? '上传中...' : '上传'}</span>
+                  <UploadCloud className="w-[clamp(26px,4.5vw,36px)] h-[clamp(26px,4.5vw,36px)] text-slate-400 group-hover:text-blue-500 mb-2 transition-colors" />
+                  <span className="text-[clamp(11px,1.05vw,13px)] text-slate-500 font-medium">{isUploading ? '上传中...' : '上传'}</span>
                 </label>
               )}
 
@@ -1550,9 +1793,10 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     const fileThumb =
                       !isFolder(item) && item.type?.startsWith('image/') ? api.getFileUrl((item as FileItem).fileId) : '';
 
-                    const metaText = isFolder(item)
-                      ? '文件夹'
-                      : `${formatBytes((item as FileItem).size)} · ${formatTimeShort((item as FileItem).uploadedAt)}`;
+                    const metaText = isFolder(item) ? '文件夹' : `${formatBytes((item as FileItem).size)} · ${formatTimeShort((item as FileItem).uploadedAt)}`;
+
+                    const isDropTarget = isFolder(item);
+                    const isDragOver = isDropTarget && dragOverFolderKey === item.key;
 
                     return (
                       <div
@@ -1564,10 +1808,23 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                         onDoubleClick={() => {
                           if (!isFolder(item)) window.open(api.getFileUrl((item as FileItem).fileId), '_blank');
                         }}
-                        className={`relative group flex flex-col items-center p-2 rounded-xl border transition-all cursor-pointer aspect-[3/4]
+                        onDragOver={
+                          isDropTarget
+                            ? (e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setDragOverFolderKey(item.key);
+                              }
+                            : undefined
+                        }
+                        onDragLeave={isDropTarget ? () => setDragOverFolderKey(null) : undefined}
+                        onDrop={isDropTarget ? (e) => handleDropToFolderTile(e, item as FolderItem) : undefined}
+                        className={`relative group flex flex-col items-center p-[clamp(8px,1.2vw,14px)] rounded-xl border transition-all cursor-pointer aspect-[3/4]
                           ${
                             selected
                               ? 'border-blue-500 bg-blue-50 shadow-sm ring-1 ring-blue-500 z-10'
+                              : isDragOver
+                              ? 'border-blue-400 bg-blue-50 ring-2 ring-blue-300'
                               : isFlashing
                               ? 'border-emerald-400 bg-emerald-50 shadow-sm ring-1 ring-emerald-300'
                               : 'border-transparent hover:bg-white hover:shadow-md'
@@ -1575,8 +1832,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                         title={item.key}
                       >
                         <button
-                          className="absolute top-2 left-2 z-30 p-1.5 rounded-lg border border-slate-200 bg-white/85 text-slate-600 hover:bg-white transition
-                                     opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                          className="absolute top-2 left-2 z-30 p-1.5 rounded-lg border border-slate-200 bg-white/85 text-slate-600 hover:bg-white transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
                           onClick={(e) => openItemMenuFromButton(e, item)}
                           title="更多操作"
                         >
@@ -1585,29 +1841,23 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
 
                         {(selected || isMultiSelectMode) && (
                           <div className="absolute top-2 right-2 z-20 pointer-events-none">
-                            {selected ? (
-                              <CheckCircle2 className="w-5 h-5 text-blue-600 fill-white" />
-                            ) : (
-                              <div className="w-5 h-5 rounded-full border-2 border-slate-300 bg-white/80" />
-                            )}
+                            {selected ? <CheckCircle2 className="w-5 h-5 text-blue-600 fill-white" /> : <div className="w-5 h-5 rounded-full border-2 border-slate-300 bg-white/80" />}
                           </div>
                         )}
 
                         <div className="flex-1 w-full flex items-center justify-center overflow-hidden pointer-events-none">
                           {isFolder(item) ? (
-                            <Folder className="w-16 h-16 text-blue-400/90 fill-blue-100" />
+                            <Folder className="w-[clamp(44px,6vw,84px)] h-[clamp(44px,6vw,84px)] text-blue-400/90 fill-blue-100" />
                           ) : fileThumb ? (
                             <LazyImg src={fileThumb} className="w-full h-full object-contain rounded shadow-sm" />
                           ) : (
-                            <FileText className="w-14 h-14 text-slate-400" />
+                            <FileText className="w-[clamp(40px,5.5vw,72px)] h-[clamp(40px,5.5vw,72px)] text-slate-400" />
                           )}
                         </div>
 
                         <div className="w-full text-center px-0.5 mt-2">
-                          <div className={`text-xs font-medium truncate w-full ${selected ? 'text-blue-700' : 'text-slate-700'}`}>
-                            {item.name}
-                          </div>
-                          <div className="text-[10px] text-slate-400 mt-0.5 truncate opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition">
+                          <div className={`text-[clamp(11px,1.05vw,14px)] font-medium truncate w-full ${selected ? 'text-blue-700' : 'text-slate-700'}`}>{item.name}</div>
+                          <div className="text-[clamp(10px,0.95vw,12px)] text-slate-400 mt-0.5 truncate opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition">
                             {metaText}
                           </div>
                         </div>
@@ -1618,9 +1868,9 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
               )}
             </div>
           ) : (
-            <div className="p-4 lg:p-6">
+            <div className="p-[clamp(12px,2vw,24px)]">
               <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                <div className="grid grid-cols-[minmax(0,1fr),80px,120px] sm:grid-cols-[minmax(0,1fr),120px,160px] lg:grid-cols-[minmax(0,1fr),160px,240px] gap-2 px-3 py-2 text-xs font-semibold text-slate-500 bg-slate-50 border-b border-slate-200">
+                <div className="grid grid-cols-[minmax(0,1fr),92px,150px] sm:grid-cols-[minmax(0,1fr),120px,170px] lg:grid-cols-[minmax(0,1fr),160px,240px] gap-2 px-3 py-2 text-[clamp(11px,0.95vw,12px)] font-semibold text-slate-500 bg-slate-50 border-b border-slate-200">
                   <div>名称</div>
                   <div className="text-right">大小</div>
                   <div className="text-right">时间</div>
@@ -1637,30 +1887,39 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                     const sizeText = isFolder(item) ? '-' : formatBytes((item as FileItem).size);
                     const timeText = formatTime(item.uploadedAt);
 
+                    const isDropTarget = isFolder(item);
+                    const isDragOver = isDropTarget && dragOverFolderKey === item.key;
+
                     return (
                       <div
                         key={item.key}
-                        className={`group grid grid-cols-[minmax(0,1fr),80px,120px] sm:grid-cols-[minmax(0,1fr),120px,160px] lg:grid-cols-[minmax(0,1fr),160px,240px] gap-2 px-3 py-2 text-sm border-b border-slate-100 cursor-pointer ${
-                          selected ? 'bg-blue-50' : isFlashing ? 'bg-emerald-50' : 'hover:bg-slate-50'
+                        className={`group grid grid-cols-[minmax(0,1fr),92px,150px] sm:grid-cols-[minmax(0,1fr),120px,170px] lg:grid-cols-[minmax(0,1fr),160px,240px] gap-2 px-3 py-2 text-[clamp(12px,1.05vw,14px)] border-b border-slate-100 cursor-pointer ${
+                          selected ? 'bg-blue-50' : isDragOver ? 'bg-blue-50 ring-2 ring-blue-200' : isFlashing ? 'bg-emerald-50' : 'hover:bg-slate-50'
                         }`}
                         onClick={(e) => handleItemClick(e, item)}
                         onContextMenu={(e) => openContextMenuItem(e, item)}
                         onDoubleClick={() => {
                           if (!isFolder(item)) window.open(api.getFileUrl((item as FileItem).fileId), '_blank');
                         }}
+                        onDragOver={
+                          isDropTarget
+                            ? (e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setDragOverFolderKey(item.key);
+                              }
+                            : undefined
+                        }
+                        onDragLeave={isDropTarget ? () => setDragOverFolderKey(null) : undefined}
+                        onDrop={isDropTarget ? (e) => handleDropToFolderTile(e, item as FolderItem) : undefined}
                         title={item.key}
                       >
                         <div className="flex items-center gap-2 min-w-0">
-                          {isFolder(item) ? (
-                            <Folder className="w-4 h-4 text-yellow-500 flex-shrink-0" />
-                          ) : (
-                            <FileText className="w-4 h-4 text-slate-400 flex-shrink-0" />
-                          )}
+                          {isFolder(item) ? <Folder className="w-4 h-4 text-yellow-500 flex-shrink-0" /> : <FileText className="w-4 h-4 text-slate-400 flex-shrink-0" />}
                           <span className="truncate flex-1 min-w-0">{item.name}</span>
 
                           <button
-                            className="flex-shrink-0 p-1.5 rounded-lg border border-slate-200 bg-white/85 text-slate-600 hover:bg-white transition
-                                       opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                            className="flex-shrink-0 p-1.5 rounded-lg border border-slate-200 bg-white/85 text-slate-600 hover:bg-white transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
                             onClick={(e) => openItemMenuFromButton(e, item)}
                             title="更多操作"
                           >
@@ -1682,7 +1941,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         {/* ===== 右键菜单 ===== */}
         {contextMenu.visible && (
           <div
-            className="fixed z-50 bg-white/95 backdrop-blur rounded-lg shadow-xl border border-slate-100 w-52 py-1 overflow-auto max-h-[70svh]"
+            className="fixed z-50 bg-white/95 backdrop-blur rounded-lg shadow-xl border border-slate-100 w-52 py-1 overflow-auto max-h-[min(70svh,480px)] max-w-[calc(100vw-16px)]"
             style={{ top: contextMenu.y, left: contextMenu.x }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -1799,7 +2058,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
           </div>
         )}
 
-        {/* ===== Move To Dialog（只渲染一次） ===== */}
+        {/* ===== Move To Dialog ===== */}
         {moveToOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm" onClick={() => !isMoving && setMoveToOpen(false)}>
             <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-4 border border-slate-100 max-h-[90svh] overflow-auto" onClick={(e) => e.stopPropagation()}>
@@ -1857,7 +2116,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                 <input
                   value={renameDialog.newName}
                   onChange={(e) => setRenameDialog((p) => ({ ...p, newName: e.target.value }))}
-                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500 select-text"
                   placeholder="输入新名称"
                   autoFocus
                   disabled={isRenaming}
@@ -1871,11 +2130,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                 <button className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl" disabled={isRenaming} onClick={() => setRenameDialog((p) => ({ ...p, open: false }))}>
                   取消
                 </button>
-                <button
-                  className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isRenaming ? 'bg-blue-300' : 'bg-blue-600 hover:bg-blue-700'}`}
-                  disabled={isRenaming}
-                  onClick={confirmRename}
-                >
+                <button className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isRenaming ? 'bg-blue-300' : 'bg-blue-600 hover:bg-blue-700'}`} disabled={isRenaming} onClick={confirmRename}>
                   {isRenaming ? '处理中...' : '确认'}
                 </button>
               </div>
@@ -1886,7 +2141,7 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
         {/* ===== Info Drawer ===== */}
         {infoOpen && (
           <div className="fixed inset-0 z-50 flex justify-end bg-black/20" onClick={() => setInfoOpen(false)}>
-            <div className="w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 p-4 overflow-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 p-4 overflow-auto custom-scrollbar" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between">
                 <div className="text-lg font-bold text-slate-800">详情</div>
                 <button className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" onClick={() => setInfoOpen(false)} title="关闭">
@@ -1975,18 +2230,14 @@ export function FileExplorer({ refreshNonce = 0 }: { refreshNonce?: number }) {
                   <button
                     onClick={() => setDeleteConfirm({ isOpen: false, targets: [] })}
                     disabled={isDeleting}
-                    className={`px-4 py-2 text-sm font-medium rounded-xl ${
-                      isDeleting ? 'text-slate-400 bg-slate-100 cursor-not-allowed' : 'text-slate-600 bg-slate-100 hover:bg-slate-200'
-                    }`}
+                    className={`px-4 py-2 text-sm font-medium rounded-xl ${isDeleting ? 'text-slate-400 bg-slate-100 cursor-not-allowed' : 'text-slate-600 bg-slate-100 hover:bg-slate-200'}`}
                   >
                     取消
                   </button>
                   <button
                     onClick={executeDelete}
                     disabled={isDeleting}
-                    className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${
-                      isDeleting ? 'bg-red-300 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600'
-                    }`}
+                    className={`px-4 py-2 text-sm font-medium text-white rounded-xl ${isDeleting ? 'bg-red-300 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600'}`}
                   >
                     {isDeleting ? '删除中...' : '确认删除'}
                   </button>

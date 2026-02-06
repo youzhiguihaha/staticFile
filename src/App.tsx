@@ -1,3 +1,4 @@
+// src/App.tsx
 import { useState, useEffect } from 'react';
 import { Toaster } from 'react-hot-toast';
 import { Login } from './components/Login';
@@ -38,7 +39,7 @@ export function App() {
   if (bootLoading) {
     return (
       <>
-        <div className="min-h-screen bg-gray-50 flex items-center justify-center text-slate-500">Loading...</div>
+        <div className="h-[100svh] bg-gray-50 flex items-center justify-center text-slate-500">Loading...</div>
         <Toaster position="bottom-right" />
       </>
     );
@@ -54,18 +55,22 @@ export function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
-      <header className="bg-white shadow-sm sticky top-0 z-20">
-        <div className="mx-auto max-w-7xl px-4 py-3 sm:px-6 lg:px-8 flex justify-between items-center">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+    <div className="h-[100svh] bg-gray-50 flex flex-col overflow-hidden">
+      <header className="bg-white shadow-sm sticky top-0 z-20 shrink-0">
+        <div className="w-full px-[clamp(12px,2vw,24px)] py-3 flex justify-between items-center">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center flex-shrink-0">
               <span className="text-white font-bold text-lg">C</span>
             </div>
-            <h1 className="text-lg font-bold text-gray-800 hidden sm:block">CloudDrive</h1>
+            <h1 className="text-lg font-bold text-gray-800 hidden sm:block truncate">CloudDrive</h1>
           </div>
 
-          <div className="flex items-center space-x-2">
-            <button onClick={handleRefresh} className="p-2 text-gray-500 hover:text-blue-600 rounded-lg hover:bg-gray-100 transition-colors" title="刷新">
+          <div className="flex items-center space-x-2 flex-shrink-0">
+            <button
+              onClick={handleRefresh}
+              className="p-2 text-gray-500 hover:text-blue-600 rounded-lg hover:bg-gray-100 transition-colors"
+              title="刷新"
+            >
               <RefreshCw className="h-5 w-5" />
             </button>
 
@@ -84,7 +89,8 @@ export function App() {
         </div>
       </header>
 
-      <main className="flex-1 mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 w-full">
+      {/* 关键：min-h-0 让内部滚动容器能正确占满剩余高度 */}
+      <main className="flex-1 min-h-0 w-full p-[clamp(10px,1.6vw,20px)]">
         <FileExplorer refreshNonce={refreshNonce} />
       </main>
 
