@@ -105,7 +105,7 @@ function abortError() {
 }
 
 // ==============================
-// /api/list 成本优化：in-flight 合并 + 超短 TTL 内存缓存
+// /api/list 成本优化：in-flight 合并 + 超短 TTL 内存缓存 + LRU 上限
 // ==============================
 type ListKey = string;
 
@@ -124,9 +124,50 @@ const listInflight = new Map<ListKey, InflightEntry<ListResponse>>();
 
 // 微 TTL：尽量“用户无感”，但能吃掉短时间重复请求
 const LIST_MEM_CACHE_TTL_MS = 800;
+// 增加容量上限，避免长时间使用 Map 无上限增长
+const LIST_MEM_CACHE_MAX = 256;
+const LIST_HTTP_CACHE_MAX = 256;
 
 type MemCacheEntry<T> = { ts: number; value: T };
 const listMemCache = new Map<ListKey, MemCacheEntry<ListResponse>>();
+const listHttpCache = new Map<ListKey, { etag: string; value: ListResponse; ts: number }>();
+
+function memCacheGet(k: ListKey) {
+  const v = listMemCache.get(k);
+  if (!v) return null;
+  // 刷新 LRU 顺序
+  listMemCache.delete(k);
+  listMemCache.set(k, v);
+  return v;
+}
+
+function memCacheSet(k: ListKey, v: MemCacheEntry<ListResponse>) {
+  // 刷新 LRU 顺序
+  if (listMemCache.has(k)) listMemCache.delete(k);
+  listMemCache.set(k, v);
+
+  if (listMemCache.size > LIST_MEM_CACHE_MAX) {
+    const firstKey = listMemCache.keys().next().value;
+    if (firstKey !== undefined) listMemCache.delete(firstKey);
+  }
+}
+
+function httpCacheGet(k: ListKey) {
+  const v = listHttpCache.get(k);
+  if (!v) return null;
+  listHttpCache.delete(k);
+  listHttpCache.set(k, v);
+  return v;
+}
+
+function httpCacheSet(k: ListKey, v: { etag: string; value: ListResponse; ts: number }) {
+  if (listHttpCache.has(k)) listHttpCache.delete(k);
+  listHttpCache.set(k, v);
+  if (listHttpCache.size > LIST_HTTP_CACHE_MAX) {
+    const firstKey = listHttpCache.keys().next().value;
+    if (firstKey !== undefined) listHttpCache.delete(firstKey);
+  }
+}
 
 function cloneListResponse(r: ListResponse): ListResponse {
   return {
@@ -214,13 +255,38 @@ function subscribeInflight<T>(entry: InflightEntry<T>, signal?: AbortSignal): Pr
   });
 }
 
+// ==============================
+// auth helper（不改对外接口；减少同一次调用内 localStorage 重复读取）
+// ==============================
+function requireAuthToken(logout: () => void): string {
+  const timeStr = localStorage.getItem(LOGIN_TIME_KEY);
+  if (!timeStr) throw new Error('Expired');
+
+  const ts = Number(timeStr);
+  if (!Number.isFinite(ts)) {
+    logout();
+    throw new Error('Expired');
+  }
+
+  if (Date.now() - ts > TIMEOUT_MS) {
+    logout();
+    throw new Error('Expired');
+  }
+
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (!token) throw new Error('Expired');
+  return token;
+}
+
 export const api = {
   // ===== list cache controls（仅前端内存，不增加 KV 写删）=====
   invalidateListCache(folderId: string, path?: string) {
     if (!folderId) return;
 
     if (typeof path === 'string') {
-      listMemCache.delete(makeListKey(folderId, path));
+      const k = makeListKey(folderId, path);
+      listMemCache.delete(k);
+      listHttpCache.delete(k);
       return;
     }
 
@@ -228,10 +294,14 @@ export const api = {
     for (const k of listMemCache.keys()) {
       if (k.startsWith(prefix)) listMemCache.delete(k);
     }
+    for (const k of listHttpCache.keys()) {
+      if (k.startsWith(prefix)) listHttpCache.delete(k);
+    }
   },
 
   clearListCache() {
     listMemCache.clear();
+    listHttpCache.clear();
   },
 
   // ===== auth =====
@@ -272,21 +342,28 @@ export const api = {
       const data = await res.json();
       localStorage.setItem(TOKEN_KEY, data.token);
       localStorage.setItem(LOGIN_TIME_KEY, Date.now().toString());
+
+      // 登录后清理 list 缓存，避免显示旧状态
+      this.clearListCache();
+
       return true;
     } catch {
       return false;
     }
   },
 
-  // ===== list（in-flight 合并 + 微 TTL cache + 可 abort + 可 bypassCache）=====
-  async list(folderId: string, path: string, opts?: { signal?: AbortSignal; bypassCache?: boolean }): Promise<ListResponse> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
+  // ===== list（in-flight 合并 + 微 TTL cache + LRU 上限 + HTTP 条件请求 + 可 abort + 可 bypassCache）=====
+  async list(
+    folderId: string,
+    path: string,
+    opts?: { signal?: AbortSignal; bypassCache?: boolean }
+  ): Promise<ListResponse> {
+    const token = requireAuthToken(this.logout.bind(this));
     const k = makeListKey(folderId, path);
 
     // 1) 微 TTL 内存缓存（不 bypass 时启用）
     if (!opts?.bypassCache) {
-      const cached = listMemCache.get(k);
+      const cached = memCacheGet(k);
       if (cached && Date.now() - cached.ts <= LIST_MEM_CACHE_TTL_MS) {
         return withConsumerSignal(cloneListResponse(cached.value), opts?.signal);
       }
@@ -298,12 +375,26 @@ export const api = {
       const controller = new AbortController();
       const qs = new URLSearchParams({ fid: folderId, path }).toString();
 
+      const prevHttp = httpCacheGet(k);
+      const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+      if (prevHttp?.etag) headers['If-None-Match'] = prevHttp.etag;
+
       const promise = fetch(`/api/list?${qs}`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers,
         signal: controller.signal,
+        cache: 'no-cache', // 每次重验证，避免显示长期陈旧数据
       }).then(async (res) => {
+        if (res.status === 304 && prevHttp?.value) {
+          return prevHttp.value;
+        }
         if (!res.ok) throw new Error(await readTextSafe(res));
-        return (await res.json()) as ListResponse;
+
+        const data = (await res.json()) as ListResponse;
+        const etag = res.headers.get('ETag');
+        if (etag) {
+          httpCacheSet(k, { etag, value: data, ts: Date.now() });
+        }
+        return data;
       });
 
       entry = { controller, promise, refCount: 0, done: false };
@@ -312,7 +403,7 @@ export const api = {
       entry.promise
         .then((data) => {
           // 只缓存成功结果
-          listMemCache.set(k, { ts: Date.now(), value: data });
+          memCacheSet(k, { ts: Date.now(), value: data });
         })
         .catch(() => {})
         .finally(() => {
@@ -326,10 +417,12 @@ export const api = {
   },
 
   async crumbs(folderId: string): Promise<Crumb[]> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
+    const token = requireAuthToken(this.logout.bind(this));
     const qs = new URLSearchParams({ fid: folderId }).toString();
-    const res = await fetch(`/api/crumbs?${qs}`, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetch(`/api/crumbs?${qs}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-cache',
+    });
     if (!res.ok) throw new Error(await readTextSafe(res));
     const data = await res.json();
     return Array.isArray(data?.crumbs) ? (data.crumbs as Crumb[]) : [];
@@ -337,26 +430,30 @@ export const api = {
 
   // ===== create/upload/move/delete/rename =====
   async createFolder(parentId: string, name: string): Promise<CreateFolderResponse> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
+    const token = requireAuthToken(this.logout.bind(this));
     const res = await fetch('/api/create-folder', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ parentId, name }),
     });
     if (!res.ok) throw new Error(await readTextSafe(res));
-    return (await res.json()) as CreateFolderResponse;
+    const data = (await res.json()) as CreateFolderResponse;
+
+    // 写操作成功后：立刻失效相关 list 缓存，避免短时间旧列表
+    this.invalidateListCache(parentId);
+
+    return data;
   },
 
   async upload(files: File[], folderId: string): Promise<UploadResponse> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
+    const token = requireAuthToken(this.logout.bind(this));
     const form = new FormData();
 
     for (const f of files) {
-      const safeName = f.name.replace(/[\/|]/g, '_');
-      const safeFile = new File([f], safeName, { type: f.type });
-      form.append('file', safeFile);
+      // 对齐后端 cleanName：处理 / \ |
+      const safeName = f.name.replace(/[\/\\|]/g, '_');
+      // 避免 new File([f], ...) 的额外开销：直接指定 filename
+      form.append('file', f, safeName);
     }
     form.append('folderId', folderId);
 
@@ -367,54 +464,81 @@ export const api = {
     });
     if (!res.ok) throw new Error(await readTextSafe(res));
     const data = (await res.json()) as UploadResponse;
+
+    // 写操作成功后：立刻失效相关 list 缓存
+    this.invalidateListCache(folderId);
+
     return { success: true, uploaded: Array.isArray(data?.uploaded) ? data.uploaded : [] };
   },
 
   async move(items: MoveItem[], targetFolderId: string): Promise<MoveResponse> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
+    const token = requireAuthToken(this.logout.bind(this));
     const res = await fetch('/api/move', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ items, targetFolderId }),
     });
     if (!res.ok) throw new Error(await readTextSafe(res));
-    return (await res.json()) as MoveResponse;
+    const data = (await res.json()) as MoveResponse;
+
+    // 写操作成功后：失效源目录与目标目录的 list 缓存
+    const ids = new Set<string>();
+    ids.add(targetFolderId);
+    for (const it of items || []) {
+      if (it && typeof (it as any).fromFolderId === 'string') ids.add((it as any).fromFolderId);
+    }
+    for (const id of ids) this.invalidateListCache(id);
+
+    return data;
   },
 
   async batchDelete(items: DeleteItem[]): Promise<void> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
+    const token = requireAuthToken(this.logout.bind(this));
     const res = await fetch('/api/batch-delete', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ items }),
     });
     if (!res.ok) throw new Error(await readTextSafe(res));
+
+    // 写操作成功后：失效涉及到的来源目录 list 缓存
+    const ids = new Set<string>();
+    for (const it of items || []) {
+      if (it && typeof (it as any).fromFolderId === 'string') ids.add((it as any).fromFolderId);
+    }
+    for (const id of ids) this.invalidateListCache(id);
   },
 
   async renameFile(folderId: string, oldName: string, newName: string): Promise<RenameResponse> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
+    const token = requireAuthToken(this.logout.bind(this));
     const res = await fetch('/api/rename-file', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ folderId, oldName, newName }),
     });
     if (!res.ok) throw new Error(await readTextSafe(res));
-    return (await res.json()) as RenameResponse;
+    const data = (await res.json()) as RenameResponse;
+
+    // 写操作成功后：失效当前目录 list 缓存
+    this.invalidateListCache(folderId);
+
+    return data;
   },
 
   async renameFolder(parentId: string, folderId: string, oldName: string, newName: string): Promise<RenameResponse> {
-    if (!this.checkAuth()) throw new Error('Expired');
-    const token = this.getToken();
+    const token = requireAuthToken(this.logout.bind(this));
     const res = await fetch('/api/rename-folder', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ parentId, folderId, oldName, newName }),
     });
     if (!res.ok) throw new Error(await readTextSafe(res));
-    return (await res.json()) as RenameResponse;
+    const data = (await res.json()) as RenameResponse;
+
+    // 写操作成功后：失效父目录 list 缓存
+    this.invalidateListCache(parentId);
+
+    return data;
   },
 
   getFileUrl(fileId: string) {

@@ -26,7 +26,7 @@ const MIME_TYPES = {
 const BASE_CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS, HEAD',
-  'Access-Control-Allow-Headers': 'Authorization, Content-Type, Range',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type, Range, If-None-Match',
   'Access-Control-Max-Age': '86400',
   'Access-Control-Expose-Headers': 'Content-Type, Content-Length, Content-Disposition, ETag',
 };
@@ -52,8 +52,12 @@ const FILE_CACHE_SECONDS = 31536000; // 1 year
 
 // ======= in-memory caches (reduce KV reads) =======
 let _rootEnsured = false;
+
 const DIR_CACHE_TTL_MS = 5000;
-const _dirCache = new Map(); // folderId -> { ts, dir }
+// 增加缓存容量上限，避免 isolate 长时间运行导致 Map 无上限增长
+const DIR_CACHE_MAX = 1024;
+// folderId -> { ts, dir }
+const _dirCache = new Map();
 
 // ======= Utils =======
 function now() {
@@ -79,11 +83,15 @@ function cleanName(name) {
   return (name || '').replace(/[\/\\|]/g, '').trim();
 }
 
+// 复用 Encoder/Decoder，减少分配与 GC
+const _TE = new TextEncoder();
+const _TD = new TextDecoder();
+
 function utf8Encode(str) {
-  return new TextEncoder().encode(str);
+  return _TE.encode(str);
 }
 function utf8Decode(bytes) {
-  return new TextDecoder().decode(bytes);
+  return _TD.decode(bytes);
 }
 
 function base64urlEncodeBytes(bytes) {
@@ -127,6 +135,22 @@ function getIterations(env) {
   const raw = parseInt((env.PBKDF2_ITERATIONS || '').toString(), 10);
   const v = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PBKDF2_ITER;
   return Math.min(Math.max(v, MIN_PBKDF2_ITER), MAX_PBKDF2_ITER);
+}
+
+function etagMatched(ifNoneMatch, etag) {
+  if (!ifNoneMatch || !etag) return false;
+  const v = ifNoneMatch.trim();
+  if (v === '*') return true;
+  return v.split(',').some((x) => x.trim() === etag);
+}
+
+function fnv1a32(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
 }
 
 // ======= Crypto: PBKDF2 + HMAC =======
@@ -189,7 +213,9 @@ async function verifyPassword(env, passwordInput) {
 }
 
 async function issueToken(env) {
-  const payload = { iat: now(), exp: now() + TOKEN_TTL_MS };
+  // now() 只取一次，避免重复系统调用（微优化）
+  const t = now();
+  const payload = { iat: t, exp: t + TOKEN_TTL_MS };
   const payloadB64 = base64urlEncodeBytes(utf8Encode(JSON.stringify(payload)));
   const sigB64 = base64urlEncodeBytes(await hmacSign(env, utf8Encode(payloadB64)));
   return `${payloadB64}.${sigB64}`;
@@ -211,7 +237,12 @@ async function verifyToken(env, token) {
   if (!payload?.exp || now() > payload.exp) return null;
 
   const expected = await hmacSign(env, utf8Encode(payloadB64));
-  const given = base64urlDecodeToBytes(sigB64);
+  let given;
+  try {
+    given = base64urlDecodeToBytes(sigB64);
+  } catch {
+    return null;
+  }
   if (given.length !== expected.length) return null;
 
   let r = 0;
@@ -242,6 +273,26 @@ function newDir(id, name, parentId) {
   };
 }
 
+// 简单 LRU：利用 Map 插入顺序
+function dirCacheGet(folderId) {
+  const v = _dirCache.get(folderId);
+  if (!v) return null;
+  // 刷新 LRU 顺序
+  _dirCache.delete(folderId);
+  _dirCache.set(folderId, v);
+  return v;
+}
+function dirCacheSet(folderId, entry) {
+  _dirCache.set(folderId, entry);
+  if (_dirCache.size > DIR_CACHE_MAX) {
+    const firstKey = _dirCache.keys().next().value;
+    if (firstKey !== undefined) _dirCache.delete(firstKey);
+  }
+}
+function dirCacheDelete(folderId) {
+  _dirCache.delete(folderId);
+}
+
 async function ensureRoot(env) {
   if (_rootEnsured) return;
 
@@ -249,31 +300,32 @@ async function ensureRoot(env) {
   if (!root) {
     const r = newDir(ROOT_ID, '', null);
     await env.MY_BUCKET.put(dirKey(ROOT_ID), JSON.stringify(r));
-    _dirCache.set(ROOT_ID, { ts: now(), dir: r });
+    dirCacheSet(ROOT_ID, { ts: now(), dir: r });
   } else {
-    _dirCache.set(ROOT_ID, { ts: now(), dir: root });
+    dirCacheSet(ROOT_ID, { ts: now(), dir: root });
   }
   _rootEnsured = true;
 }
 
 async function getDir(env, folderId) {
-  const cached = _dirCache.get(folderId);
-  if (cached && now() - cached.ts < DIR_CACHE_TTL_MS) return cached.dir;
+  const t = now();
+  const cached = dirCacheGet(folderId);
+  if (cached && t - cached.ts < DIR_CACHE_TTL_MS) return cached.dir;
 
   const dir = await env.MY_BUCKET.get(dirKey(folderId), { type: 'json' });
-  if (dir) _dirCache.set(folderId, { ts: now(), dir });
+  if (dir) dirCacheSet(folderId, { ts: t, dir });
   return dir;
 }
 
 async function putDir(env, dirObj) {
   dirObj.updatedAt = now();
   await env.MY_BUCKET.put(dirKey(dirObj.id), JSON.stringify(dirObj));
-  _dirCache.set(dirObj.id, { ts: now(), dir: dirObj });
+  dirCacheSet(dirObj.id, { ts: now(), dir: dirObj });
 }
 
 async function deleteDir(env, folderId) {
   await env.MY_BUCKET.delete(dirKey(folderId));
-  _dirCache.delete(folderId);
+  dirCacheDelete(folderId);
 }
 
 function ensureUniqueName(mapObj, desiredName) {
@@ -303,10 +355,33 @@ async function isDescendant(env, maybeChildId, maybeAncestorId, limit = 64) {
   return false;
 }
 
+// 预计算祖先集合（用于 move 防循环校验：减少重复 KV 读取）
+async function getAncestorSet(env, startId, limit = 64) {
+  const set = new Set();
+  let cur = startId;
+  for (let i = 0; i < limit; i++) {
+    if (!cur) break;
+    set.add(cur);
+    const d = await getDir(env, cur);
+    cur = d?.parentId || null;
+  }
+  return set;
+}
+
 // ======= fileId：UUID(128-bit) =======
 function makeFileId(extWithDot) {
   const base = crypto.randomUUID().replace(/-/g, '');
   return `${base}${extWithDot || ''}`;
+}
+
+// 并发分批（不增加 delete 次数，只减少串行等待的总耗时）
+async function inBatches(items, batchSize, fn) {
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const ret = await Promise.allSettled(batch.map(fn));
+    const failed = ret.find((x) => x.status === 'rejected');
+    if (failed) throw failed.reason || new Error('Batch operation failed');
+  }
 }
 
 // ======= Router =======
@@ -376,12 +451,27 @@ async function handleApi(request, env, ctx) {
     const folderId = (url.searchParams.get('fid') || ROOT_ID).trim() || ROOT_ID;
 
     if (folderId === ROOT_ID) {
+      const etag = `W/"crumbs-root"`;
+      if (etagMatched(request.headers.get('If-None-Match') || '', etag)) {
+        return new Response(null, {
+          status: 304,
+          headers: {
+            'ETag': etag,
+            'Cache-Control': 'private, max-age=0, must-revalidate',
+            'Vary': 'Authorization',
+            ...BASE_CORS,
+          },
+        });
+      }
+
       return new Response(
         JSON.stringify({ success: true, crumbs: [{ folderId: ROOT_ID, name: '根目录', path: '' }] }),
         {
           headers: {
             'Content-Type': 'application/json; charset=utf-8',
-            'Cache-Control': 'no-store',
+            'Cache-Control': 'private, max-age=0, must-revalidate',
+            'ETag': etag,
+            'Vary': 'Authorization',
             ...BASE_CORS,
           },
         }
@@ -417,10 +507,27 @@ async function handleApi(request, env, ctx) {
       return { ...c, path: p };
     });
 
+    const crumbSig = chain.map((c) => `${c.folderId}:${c.name}`).join('|');
+    const etag = `W/"crumbs-${fnv1a32(crumbSig)}"`;
+
+    if (etagMatched(request.headers.get('If-None-Match') || '', etag)) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          'ETag': etag,
+          'Cache-Control': 'private, max-age=0, must-revalidate',
+          'Vary': 'Authorization',
+          ...BASE_CORS,
+        },
+      });
+    }
+
     return new Response(JSON.stringify({ success: true, crumbs }), {
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
+        'Cache-Control': 'private, max-age=0, must-revalidate',
+        'ETag': etag,
+        'Vary': 'Authorization',
         ...BASE_CORS,
       },
     });
@@ -428,11 +535,26 @@ async function handleApi(request, env, ctx) {
 
   // ===== list =====
   if (url.pathname === '/api/list') {
+    if (request.method !== 'GET') return new Response(null, { status: 405, headers: BASE_CORS });
+
     const folderId = (url.searchParams.get('fid') || ROOT_ID).trim() || ROOT_ID;
     const path = (url.searchParams.get('path') || '').trim();
 
     const dir = await getDir(env, folderId);
     if (!dir) return new Response('Folder not found', { status: 404, headers: BASE_CORS });
+
+    const etag = `W/"list-${dir.id}-${dir.updatedAt || 0}"`;
+    if (etagMatched(request.headers.get('If-None-Match') || '', etag)) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          'ETag': etag,
+          'Cache-Control': 'private, max-age=0, must-revalidate',
+          'Vary': 'Authorization',
+          ...BASE_CORS,
+        },
+      });
+    }
 
     const folders = Object.entries(dir.folders || {}).map(([name, id]) => ({
       key: `${path}${name}/`,
@@ -469,9 +591,9 @@ async function handleApi(request, env, ctx) {
       {
         headers: {
           'Content-Type': 'application/json; charset=utf-8',
-          'Cache-Control': 'no-store',
-          'Pragma': 'no-cache',
-          'Expires': '0',
+          'Cache-Control': 'private, max-age=0, must-revalidate',
+          'ETag': etag,
+          'Vary': 'Authorization',
           ...BASE_CORS,
         },
       }
@@ -677,12 +799,20 @@ async function handleApi(request, env, ctx) {
       });
     }
 
+    // 防循环校验：预计算 target 的祖先链集合，避免对每个 folder 重复向上读 KV
+    const targetAncestorSet = await getAncestorSet(env, targetFolderId, 64);
+
     for (const g of group.values()) {
       for (const fd of g.folders) {
         const folderId = (fd.folderId || '').trim();
         if (!folderId) continue;
-        if (folderId === targetFolderId) return new Response('Invalid move', { status: 400, headers: BASE_CORS });
-        if (await isDescendant(env, targetFolderId, folderId)) return new Response('Invalid move', { status: 400, headers: BASE_CORS });
+        if (folderId === targetFolderId) {
+          return new Response('Invalid move', { status: 400, headers: BASE_CORS });
+        }
+        // 等价判断：folderId 是 target 的祖先 => target 是 folderId 的后代 => 禁止 move
+        if (targetAncestorSet.has(folderId)) {
+          return new Response('Invalid move', { status: 400, headers: BASE_CORS });
+        }
       }
     }
 
@@ -700,6 +830,9 @@ async function handleApi(request, env, ctx) {
     let targetDirty = false;
     const targetAddedFiles = [];
     const targetAddedFolders = [];
+
+    // 记录每个 folderId 的“最后一次更新”（保持原语义：最后一次处理生效）
+    const movedFolderUpdates = new Map(); // folderId -> { parentId, name }
 
     for (const [fromId, g] of group.entries()) {
       const src = sourceDirs.get(fromId);
@@ -737,14 +870,20 @@ async function handleApi(request, env, ctx) {
         dirty.set(fromId, true);
         targetDirty = true;
 
-        const moved = await getDir(env, folderId);
-        if (moved) {
-          moved.parentId = targetFolderId;
-          moved.name = newName;
-          await putDir(env, moved);
-        }
+        // 只记录最后一次 name（保持“重复输入时最后一次生效”的语义）
+        movedFolderUpdates.set(folderId, { parentId: targetFolderId, name: newName });
 
         targetAddedFolders.push({ name: newName, folderId });
+      }
+    }
+
+    // 更新 moved folder 自身（每个 folderId 只写一次，但保持“最后一次生效”语义）
+    for (const [folderId, upd] of movedFolderUpdates.entries()) {
+      const moved = await getDir(env, folderId);
+      if (moved) {
+        moved.parentId = upd.parentId;
+        moved.name = upd.name;
+        await putDir(env, moved);
       }
     }
 
@@ -792,23 +931,36 @@ async function handleApi(request, env, ctx) {
     const fileIdsToPurgeCache = [];
     const dirToDeleteFolderIds = [];
 
-    async function collectFolderRecursive(folderId) {
-      const d = await getDir(env, folderId);
-      if (!d) return;
+    // 收集阶段去重：避免重复遍历子树导致额外 KV 读取
+    const visitedFolderIds = new Set();
 
-      for (const meta of Object.values(d.files || {})) {
-        if (meta?.fileId) {
-          binToDelete.push(binKey(meta.fileId));
-          fileIdsToPurgeCache.push(meta.fileId);
-          if (binToDelete.length > MAX_BIN_DELETES) throw new Error('TOO_MANY_DELETES');
+    // 迭代 DFS：避免深层递归栈溢出风险
+    async function collectFolderIterative(rootFolderId) {
+      const stack = [rootFolderId];
+
+      while (stack.length) {
+        const folderId = stack.pop();
+        if (!folderId) continue;
+        if (visitedFolderIds.has(folderId)) continue;
+        visitedFolderIds.add(folderId);
+
+        const d = await getDir(env, folderId);
+        if (!d) continue;
+
+        for (const meta of Object.values(d.files || {})) {
+          if (meta?.fileId) {
+            binToDelete.push(binKey(meta.fileId));
+            fileIdsToPurgeCache.push(meta.fileId);
+            if (binToDelete.length > MAX_BIN_DELETES) throw new Error('TOO_MANY_DELETES');
+          }
         }
-      }
 
-      for (const childId of Object.values(d.folders || {})) {
-        await collectFolderRecursive(childId);
-      }
+        for (const childId of Object.values(d.folders || {})) {
+          stack.push(childId);
+        }
 
-      dirToDeleteFolderIds.push(folderId);
+        dirToDeleteFolderIds.push(folderId);
+      }
     }
 
     for (const [fromId, g] of group.entries()) {
@@ -839,7 +991,7 @@ async function handleApi(request, env, ctx) {
           delete src.folders[name];
           dirty.set(fromId, true);
           try {
-            await collectFolderRecursive(folderId);
+            await collectFolderIterative(folderId);
           } catch (e) {
             if (e?.message === 'TOO_MANY_DELETES') {
               return new Response('Too many deletes. Please delete in smaller batches.', { status: 413, headers: BASE_CORS });
@@ -855,10 +1007,12 @@ async function handleApi(request, env, ctx) {
     }
 
     const uniqBin = Array.from(new Set(binToDelete));
-    for (const k of uniqBin) await env.MY_BUCKET.delete(k);
+    // 分批并发删除：不增加 delete 次数，减少总耗时与超时风险
+    await inBatches(uniqBin, 50, (k) => env.MY_BUCKET.delete(k));
 
     const uniqDirFolderIds = Array.from(new Set(dirToDeleteFolderIds));
-    for (const folderId of uniqDirFolderIds) await deleteDir(env, folderId);
+    // 同样分批删除目录 key（通过 deleteDir，确保同步清理 _dirCache）
+    await inBatches(uniqDirFolderIds, 50, (folderId) => deleteDir(env, folderId));
 
     // ===== 方案C：purge edge cache（不消耗 KV 次数）=====
     const uniqFileIds = Array.from(new Set(fileIdsToPurgeCache.filter(Boolean)));
@@ -891,7 +1045,13 @@ async function handleFile(request, env, ctx) {
     if (!env.MY_BUCKET) return new Response('KV not bound', { status: 500, headers: BASE_CORS });
 
     const url = new URL(request.url);
-    const fileId = decodeURIComponent(url.pathname.slice('/file/'.length) || '');
+    let fileId = '';
+    try {
+      fileId = decodeURIComponent(url.pathname.slice('/file/'.length) || '');
+    } catch {
+      return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
+    }
+
     if (!fileId || fileId.length < 5) return new Response('Invalid ID', { status: 400, headers: BASE_CORS });
 
     const cacheKey = new Request(url.origin + url.pathname, { method: 'GET' });
