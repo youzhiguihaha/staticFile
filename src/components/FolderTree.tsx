@@ -2,8 +2,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import { Folder, FolderOpen, ChevronRight, ChevronDown, Check, Loader2 } from 'lucide-react';
-import { api, FolderItem, MoveItem } from '../lib/api';
+import * as api from '../lib/api';
+import type { FolderItem, MoveItem } from '../lib/api';
 import toast from 'react-hot-toast';
+
 
 export type Crumb = { folderId: string; name: string; path: string };
 
@@ -327,4 +329,5 @@ export function FolderTree({
       <div className="w-full min-w-0">{renderNode(root, 0, [])}</div>
     </div>
   );
+
 }
