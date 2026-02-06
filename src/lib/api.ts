@@ -1,16 +1,23 @@
 // api.ts
 // 前端 API 层：不改接口路径，只加“304/ETag + 超时 + 轻重试”
-// 兼容调用：getList / getCrumbs / getFileUrl
+// 兼容调用：getList / getCrumbs / getFileUrl / list / crumbs / fileUrl / api
 
 type ApiOk<T> = { ok: true; data: T };
 type ApiErr = { ok: false; error?: string };
 export type ApiResp<T> = ApiOk<T> | ApiErr;
 
+// ===== 补上类型导出（先用宽松类型，保证编译过）=====
+export type FolderItem = Record<string, any>;
+export type FileItem = Record<string, any>;
+export type ExplorerItem = Record<string, any>;
+export type MoveItem = Record<string, any>;
+export type DeleteItem = Record<string, any>;
+
 const ETAG_CACHE = new Map<string, string>();
 const JSON_CACHE = new Map<string, any>();
 
 const DEFAULT_TIMEOUT = 12000;
-const RETRY_COUNT = 1; // GET 失败最多重试 1 次
+const RETRY_COUNT = 1;
 const RETRY_DELAY = 250;
 
 function sleep(ms: number) {
@@ -51,7 +58,6 @@ async function requestJson<T = any>(url: string, init: RequestInit = {}): Promis
     try {
       let resp = await fetchWithTimeout(url, { ...init, headers }, DEFAULT_TIMEOUT);
 
-      // 修复点：304 且本地无缓存时，去掉 If-None-Match 再拉一次
       if (resp.status === 304) {
         const cached = JSON_CACHE.get(url);
         if (cached !== undefined) return cached as T;
@@ -84,30 +90,25 @@ async function requestJson<T = any>(url: string, init: RequestInit = {}): Promis
   throw lastErr || new Error("request failed");
 }
 
-/** 保持接口：/api/list?dir=xxx */
 export async function getList<T = any[]>(dir = "root"): Promise<ApiResp<T>> {
   const url = `/api/list?dir=${encodeURIComponent(dir)}`;
   return requestJson<ApiResp<T>>(url, { method: "GET" });
 }
 
-/** 保持接口：/api/crumbs?dir=xxx */
 export async function getCrumbs<T = any[]>(dir = "root"): Promise<ApiResp<T>> {
   const url = `/api/crumbs?dir=${encodeURIComponent(dir)}`;
   return requestJson<ApiResp<T>>(url, { method: "GET" });
 }
 
-/** 保持直链路径：/file/:id */
 export function getFileUrl(fileId: string): string {
   return `/file/${encodeURIComponent(fileId)}`;
 }
 
-/** 可选：拿文件头信息（不下载 body） */
 export async function headFile(fileId: string): Promise<Response> {
   const url = getFileUrl(fileId);
   return fetchWithTimeout(url, { method: "HEAD" }, 10000);
 }
 
-/** 可选：按需拉取 Range（例如视频播放器） */
 export async function fetchFileRange(fileId: string, start: number, end?: number): Promise<Response> {
   const url = getFileUrl(fileId);
   const headers = new Headers();
@@ -115,7 +116,6 @@ export async function fetchFileRange(fileId: string, start: number, end?: number
   return fetchWithTimeout(url, { method: "GET", headers }, 15000);
 }
 
-/** 手动清理前端缓存 */
 export function clearApiCache(path?: string) {
   if (!path) {
     ETAG_CACHE.clear();
@@ -126,13 +126,22 @@ export function clearApiCache(path?: string) {
   JSON_CACHE.delete(path);
 }
 
-const api = {
+// ===== 兼容旧调用名 =====
+export const list = getList;
+export const crumbs = getCrumbs;
+export const fileUrl = getFileUrl;
+
+// ===== 关键：同时提供 named export `api` 和 default export =====
+export const api = {
   getList,
   getCrumbs,
   getFileUrl,
   headFile,
   fetchFileRange,
   clearApiCache,
+  list,
+  crumbs,
+  fileUrl,
 };
 
 export default api;
