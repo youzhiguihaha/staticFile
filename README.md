@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Vue-3-4FC08D?style=flat-square&logo=vue.js" alt="Vue 3">
 </p>
 
-> ⚠️ **声明**：本人小白，项目全部是用 GPT 和 Gemini 编写（存在部分小问题，但不影响日常使用体验），需要新功能和修复问题可以尝试自己在项目里更改。
+> ⚠️ **声明**：项目构思和框架基于 GPT 和 Gemini 编写（存在部分小问题，但不影响日常使用体验），需要新功能和修复问题可以尝试自己在项目里更改。
 
 ---
 
